@@ -70,6 +70,9 @@ export function DockerRunPanel({
   // The image runs as the unprivileged "tgdcfs" user; root is an opt-in
   // override for host directories it cannot read or write.
   const [asRoot, setAsRoot] = useState(false);
+  // Attached runs only: a detached container's output goes to the engine's
+  // logs, so there is nothing to tee.
+  const [logToFile, setLogToFile] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const engineName = engine === "podman" ? "Podman" : "Docker";
@@ -101,6 +104,7 @@ export function DockerRunPanel({
     ...envVars.map((name) => `-e ${name}`),
     `-v "${hostPath}:${dataDir}"`,
     `${selectedImage}:latest`,
+    ...(logToFile && !detached ? ["2>&1 | tee tgdcfslog.txt"] : []),
   ].join(" ");
 
   // Compose reads the passphrase from a .env file next to it, so the
@@ -238,6 +242,28 @@ export function DockerRunPanel({
           is only needed when it cannot read or write the directory mounted
           below (a warning about permissions in the container logs).
         </Typography>
+      )}
+      {variant === "run" && !detached && (
+        <>
+          <FormControlLabel
+            label="Log to txt file"
+            control={
+              <Checkbox
+                checked={logToFile}
+                onChange={(e) => setLogToFile(e.target.checked)}
+                size="small"
+              />
+            }
+            sx={{ mb: 1 }}
+          />
+          {logToFile && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Pipes the container output through <code>tee</code> into
+              <code> tgdcfslog.txt</code> in the directory the command runs
+              from; the log still shows in the terminal.
+            </Typography>
+          )}
+        </>
       )}
       <Box
         sx={{
