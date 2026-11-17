@@ -24,11 +24,15 @@ from tgdcfs.core.repository.impl import (
     StoreFDRepository,
     StoreFileContentRepository,
 )
+from tgdcfs.core.repository.impl.metadata.redundant import (
+    RedundantMetadataRepository,
+)
 from tgdcfs.core.repository.interface import (
     IFDRepository,
     IFileContentRepository,
     IMetaDataRepository,
 )
+from tgdcfs.crypto.buffer import MetadataCrypto
 
 # Builds the live store for a store config; the backends' logins live
 # behind it so ``Client.create`` never touches a backend library.
@@ -68,6 +72,13 @@ class Client:
     def message_api(self) -> IStore:
         """The primary store, under the name the app layer grew up with."""
         return self.store
+
+    @property
+    def has_redundant_metadata(self) -> bool:
+        """Whether this file system keeps its metadata in several stores."""
+        if self.metadata_api is None:
+            return False
+        return self.metadata_api.has_redundant_metadata
 
     @classmethod
     async def create(
@@ -135,6 +146,10 @@ class Client:
         # file-reference names stored in the GitHub repo) and hand it to the
         # metadata backend below.
         path_name_key: Optional[bytes] = None
+        # At-rest encryption for the metadata blob itself (pinned message,
+        # GitLab repo); ``None`` when encryption is off, and the blob is
+        # written as plain JSON.
+        metadata_crypto: Optional[MetadataCrypto] = None
         if encryption_cfg is not None and encryption_cfg.enabled:
             from tgdcfs.crypto.bootstrap import load_master_key
             from tgdcfs.crypto.repository import EncryptingFileContentRepository
@@ -145,6 +160,9 @@ class Client:
                 master_key=master.key,
                 chunk_size=encryption_cfg.chunk_size,
                 encrypt_names=encryption_cfg.encrypt_names,
+            )
+            metadata_crypto = MetadataCrypto(
+                master.key, encryption_cfg.chunk_size
             )
             if encryption_cfg.encrypt_names:
                 from tgdcfs.crypto.path_names import derive_path_name_key
@@ -157,24 +175,89 @@ class Client:
             local_versions=cache.complete if cache is not None else None,
         )
 
-        metadata_cfg = filesystem.metadata
-        if metadata_cfg.type == MetadataType.PINNED_MESSAGE:
-            metadata_repo: IMetaDataRepository = PinnedMessageMetadataRepository(
-                store, fc_repo, mirror_group=mirror_group
+        # The metadata redundancy set: one repository per entry, the
+        # first that can be read wins on boot and every push fans out
+        # to all of them. A single entry keeps the plain repository.
+        redundant = len(filesystem.metadata) > 1
+        # Store keys with their own pinned metadata entry; the automatic
+        # promotion copy of the pinned message skips them so one channel
+        # never holds two pinned metadata documents. Worked out before
+        # the repositories are built, so every entry sees the whole set.
+        skip_mirror_keys: set[str] = set()
+        for entry in filesystem.metadata:
+            if entry.type != MetadataType.PINNED_MESSAGE or entry.store is None:
+                continue
+            if entry.store == filesystem.primary:
+                continue
+            skip_mirror_keys.add(config.stores[entry.store].key)
+
+        entries: List[tuple[str, IMetaDataRepository]] = []
+        for entry in filesystem.metadata:
+            if entry.type == MetadataType.PINNED_MESSAGE:
+                # The entry's store: the primary by default, any mirror
+                # otherwise -- which is how a Telegram pinned message
+                # and a Discord pinned message are told apart.
+                pinned_store = store
+                if entry.store is not None:
+                    store_key = config.stores[entry.store].key
+                    if mirror_group is not None:
+                        pinned_store = (
+                            mirror_group.store_for(store_key) or store
+                        )
+                entries.append(
+                    (
+                        f"pinned_message:{entry.store or filesystem.primary}",
+                        PinnedMessageMetadataRepository(
+                            pinned_store,
+                            mirror_group=mirror_group,
+                            skip_mirror_keys=frozenset(skip_mirror_keys),
+                            crypto=metadata_crypto,
+                        ),
+                    )
+                )
+            elif entry.github_repo is not None:
+                from tgdcfs.core.repository.impl.metadata.github_repo import (
+                    GithubRepoMetadataRepository,
+                )
+
+                # Outages are absorbed (the in-memory tree is the record)
+                # when another entry can take over; the redundant wrapper
+                # rebuilds the repo from it once GitHub answers again.
+                entries.append(
+                    (
+                        f"github_repo:{entry.github_repo.repo}",
+                        GithubRepoMetadataRepository(
+                            entry.github_repo,
+                            name_key=path_name_key,
+                            tolerate_write_failures=redundant,
+                        ),
+                    )
+                )
+            elif entry.gitlab_repo is not None:
+                from tgdcfs.core.repository.impl.metadata.gitlab_repo import (
+                    GitlabRepoMetadataRepository,
+                )
+
+                entries.append(
+                    (
+                        f"gitlab_repo:{entry.gitlab_repo.repo}",
+                        GitlabRepoMetadataRepository(
+                            entry.gitlab_repo, crypto=metadata_crypto
+                        ),
+                    )
+                )
+            else:
+                raise ValueError(
+                    f"configuration filesystems -> {filesystem.name} -> "
+                    f"metadata -> {entry.name} has no store configured"
+                )
+
+        if redundant:
+            metadata_repo: IMetaDataRepository = RedundantMetadataRepository(
+                entries
             )
         else:
-            if (github_repo_config := metadata_cfg.github_repo) is None:
-                raise ValueError(
-                    f"configuration filesystems -> {filesystem.name} -> metadata "
-                    f"-> github_repo is required."
-                )
-            from tgdcfs.core.repository.impl.metadata.github_repo import (
-                GithubRepoMetadataRepository,
-            )
-
-            metadata_repo = GithubRepoMetadataRepository(
-                github_repo_config, name_key=path_name_key
-            )
+            metadata_repo = entries[0][1]
 
         write_back = filesystem.write_ack == "cache" and cache is not None
         fd_api = FileDescApi(

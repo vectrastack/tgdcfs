@@ -17,6 +17,7 @@ from tgdcfs.core.repository.interface import IMetaDataRepository
 from tgdcfs.crypto.path_names import (
     PathNameEncryptionError,
     decrypt_path_name,
+    encrypt_path_name,
     is_encrypted_path_name,
 )
 from tgdcfs.errors import TechnicalError
@@ -51,9 +52,17 @@ def _blob_sha(content: str) -> str:
 
 
 class GithubRepoMetadataRepository(IMetaDataRepository):
-    def __init__(self, config: GithubRepoConfig, name_key: Optional[bytes] = None):
+    def __init__(
+        self,
+        config: GithubRepoConfig,
+        name_key: Optional[bytes] = None,
+        tolerate_write_failures: bool = False,
+    ):
         super().__init__()
         self._stats_loads: dict[int, asyncio.Future[bool]] = {}
+        # Set when the last tree read failed; ``get`` then raises instead
+        # of handing out a blank tree that looks like an empty file system.
+        self._tree_read_failed: bool = False
 
         gh = Github(config.access_token)
         repo = gh.get_repo(config.repo)
@@ -72,7 +81,145 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             name_key=name_key,
             timestamps=self._timestamps,
             tree_fetch_concurrency=config.tree_fetch_concurrency,
+            tolerate_write_failures=tolerate_write_failures,
         )
+
+    # -- redundancy ---------------------------------------------------------
+
+    @property
+    def is_stale(self) -> bool:
+        """Whether a write was absorbed because GitHub refused it.
+
+        While stale, the in-memory tree is the metadata of record and the
+        repository has to be rebuilt from it; the redundant wrapper
+        does exactly that on its next push.
+        """
+        return self._ghc.stale
+
+    def mark_stale(self) -> None:
+        self._ghc.stale = True
+
+    def owns_tree(self) -> bool:
+        """Whether the in-memory tree is this repository's own
+        (GithubDirectory) form, i.e. was loaded from here."""
+        return self.metadata is not None and isinstance(
+            self.metadata.dir, GithubDirectory
+        )
+
+    async def restore(self) -> None:
+        """Rebuild the whole repository from the in-memory tree.
+
+        One commit replaces the repo's entire content with what the
+        tree says: every directory's ``.gitkeep``, every file reference
+        blob, every stats file. Used to bring a repository that missed
+        writes (an outage absorbed by the redundant metadata) back in
+        step, and to write a tree that was loaded from another metadata
+        store into a repository that has none of it.
+        """
+        if self.metadata is None:
+            from tgdcfs.errors import MetadataNotInitialized
+
+            raise MetadataNotInitialized()
+        elements = await asyncio.to_thread(self._tree_elements, self.metadata.dir)
+        await self._ghc.write(self._rebuild, elements)
+        self._ghc.stale = False
+        # The rebuild rewrote the history the cached directory dates were
+        # read from; revalidate so the cache drops what no longer holds.
+        if self._ghc.timestamps is not None:
+            await asyncio.to_thread(self._ghc.timestamps.load)
+
+    def _tree_elements(self, root: TGFSDirectory) -> list[InputGitTreeElement]:
+        """Every blob the repo needs for ``root``'s subtree, as tree
+        elements with full storage paths (the encrypted form of every
+        name when path-name encryption is keyed)."""
+        elements: list[InputGitTreeElement] = []
+        key = self._ghc.name_key
+
+        def stored(name: str) -> str:
+            return encrypt_path_name(key, name) if key is not None else name
+
+        def walk(directory: TGFSDirectory, prefix: str) -> None:
+            stats = {
+                str(fr.message_id): fr.stat.to_dict()
+                for fr in directory.find_files()
+                if fr.stat is not None
+            }
+            if stats:
+                elements.append(
+                    InputGitTreeElement(
+                        path=f"{prefix}{STATS_FILE_NAME}",
+                        mode="100644",
+                        type="blob",
+                        content=json.dumps(
+                            stats, sort_keys=True, separators=(",", ":")
+                        ),
+                    )
+                )
+            for fr in directory.find_files():
+                elements.append(
+                    InputGitTreeElement(
+                        path=f"{prefix}{stored(fr.name)}.{fr.message_id}",
+                        mode="100644",
+                        type="blob",
+                        content="",
+                    )
+                )
+            for child in directory.find_dirs():
+                segment = stored(child.name)
+                elements.append(
+                    InputGitTreeElement(
+                        path=f"{prefix}{segment}/.gitkeep",
+                        mode="100644",
+                        type="blob",
+                        content="",
+                    )
+                )
+                walk(child, f"{prefix}{segment}/")
+
+        walk(root, "")
+        return elements
+
+    def _rebuild(self, elements: list[InputGitTreeElement]) -> None:
+        """Replace the repo's whole content with ``elements`` in one
+        commit on top of the branch head. Blocking; runs on the writer
+        thread."""
+        repo = self._ghc.repo
+        ref = repo.get_git_ref(f"heads/{self._ghc.commit}")
+        base_commit = repo.get_git_commit(ref.object.sha)
+        tree = repo.create_git_tree(elements)
+        commit = repo.create_git_commit(
+            "Restore the TGDCFS metadata tree", tree, [base_commit]
+        )
+        ref.edit(commit.sha)
+        logger.info(
+            f"Rebuilt {self._ghc.repo_name}@{self._ghc.commit} from the "
+            f"in-memory tree ({len(elements)} blobs)"
+        )
+
+    def adopt(self) -> bool:
+        """Wrap the in-memory tree in this repository's own directory
+        objects, so writes commit to GitHub again.
+
+        The tree a fallback metadata store loaded is made of plain
+        directories; after the repository has been rebuilt from it, the
+        plain tree is replaced here (file refs keep their identity, only
+        the directories around them are re-wrapped). Returns whether
+        the tree was replaced; a tree that already is this repository's
+        own form is left alone.
+        """
+        if self.metadata is None or isinstance(self.metadata.dir, GithubDirectory):
+            return False
+        self.metadata.dir = self._adopt_dir(self.metadata.dir, None)
+        return True
+
+    def _adopt_dir(self, plain: TGFSDirectory, parent: Optional[GithubDirectory]):
+        wrapped = GithubDirectory(self._ghc, plain.name, parent, children=[], files=[])
+        for fr in plain.find_files():
+            fr.location = wrapped
+            wrapped.files.append(fr)
+        for child in plain.find_dirs():
+            wrapped.children.append(self._adopt_dir(child, wrapped))
+        return wrapped
 
     async def push(self) -> None:
         pass
@@ -166,7 +313,15 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             # Same writer thread as the file references: both commit on the
             # branch, and two at once is what made the stats ref update fail
             # with "not a fast forward".
-            await self._ghc.write(self._commit_stats, writes)
+            try:
+                await self._ghc.write(self._commit_stats, writes)
+            except Exception as ex:
+                if self._ghc.tolerate("Writing file stats", ex):
+                    # Redundant metadata: the in-memory stats are the
+                    # record; the repo catches up with the next push.
+                    pass
+                else:
+                    raise
             for directory, content in changes:
                 directory.stats_sha = None if content is None else _blob_sha(content)
                 directory.stats_loaded = True
@@ -232,6 +387,11 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
         # Off the loop too: with a large repo the walk is a request per
         # directory. The structure is built fresh, so nothing is shared.
         root_dir = await asyncio.to_thread(self._build_directory_structure)
+        if self._tree_read_failed:
+            raise TechnicalError(
+                f"Could not read the metadata tree of "
+                f"{self._ghc.repo_name}@{self._ghc.commit}"
+            )
         return TGFSMetadata(dir=root_dir)
 
     def _build_directory_structure(self) -> GithubDirectory:
@@ -247,7 +407,12 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             else:
                 contents = self._ghc.repo.get_contents("", ref=self._ghc.commit)
                 self._process_contents(contents, root)
+            self._tree_read_failed = False
         except Exception as ex:
+            # A repo that could not be read is an error, not an empty
+            # file system: the redundant metadata wrapper fails over to
+            # another store instead of trusting a blank tree.
+            self._tree_read_failed = True
             logger.error(ex)
 
         return root

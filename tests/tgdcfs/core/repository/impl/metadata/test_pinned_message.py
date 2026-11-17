@@ -1,25 +1,38 @@
 import json
+
 import pytest
 
 from tgdcfs.backends.base import StoreCapabilities
 from tgdcfs.backends.telegram.store import TelegramStore
-from tgdcfs.core.model import TGFSDirectory, TGFSFileVersion, TGFSMetadata
+from tgdcfs.core.model import TGFSDirectory, TGFSMetadata
 from tgdcfs.core.repository.impl.metadata.pinned_message import (
     PinnedMessageMetadataRepository,
 )
-from tgdcfs.core.repository.interface import IFileContentRepository
+from tgdcfs.crypto.buffer import MetadataCrypto
 from tgdcfs.errors import MetadataNotInitialized, NoPinnedMessage
 from tgdcfs.reqres import (
+    Document,
     FileMessageFromBuffer,
     MessageRespWithDocument,
     SentFileMessage,
-    Document,
 )
+
+
+class _Chunks:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    @property
+    def chunks(self):
+        async def iterator():
+            yield self._data
+
+        return iterator()
 
 
 class TestPinnedMessageMetadataRepository:
     @pytest.fixture
-    def mock_message_api(self, mocker):
+    def store(self, mocker):
         store = mocker.AsyncMock(spec=TelegramStore)
         store.key = "tg:111"
         store.caps = StoreCapabilities(
@@ -28,19 +41,12 @@ class TestPinnedMessageMetadataRepository:
         return store
 
     @pytest.fixture
-    def mock_fc_repo(self, mocker):
-        return mocker.AsyncMock(spec=IFileContentRepository)
-
-    @pytest.fixture
-    def repository(
-        self, mock_message_api, mock_fc_repo
-    ) -> PinnedMessageMetadataRepository:
-        return PinnedMessageMetadataRepository(mock_message_api, mock_fc_repo)
+    def repository(self, store) -> PinnedMessageMetadataRepository:
+        return PinnedMessageMetadataRepository(store)
 
     @pytest.fixture
     def sample_metadata(self) -> TGFSMetadata:
-        root_dir = TGFSDirectory.root_dir()
-        return TGFSMetadata(root_dir)
+        return TGFSMetadata(TGFSDirectory.root_dir())
 
     @pytest.fixture
     def sample_pinned_message(self) -> MessageRespWithDocument:
@@ -53,11 +59,10 @@ class TestPinnedMessageMetadataRepository:
         )
         return MessageRespWithDocument(message_id=123, text="", document=document)
 
-    def test_init(self, mock_message_api, mock_fc_repo):
-        repo = PinnedMessageMetadataRepository(mock_message_api, mock_fc_repo)
+    def test_init(self, store):
+        repo = PinnedMessageMetadataRepository(store)
 
-        assert repo._message_api == mock_message_api
-        assert repo._fc_repo == mock_fc_repo
+        assert repo._store is store
         assert repo._message_id is None
         assert repo.metadata is None
 
@@ -71,151 +76,132 @@ class TestPinnedMessageMetadataRepository:
 
     @pytest.mark.asyncio
     async def test_push_new_metadata_creates_pinned_message(
-        self, repository, mock_message_api, mock_fc_repo, sample_metadata
+        self, repository, store, sample_metadata
     ):
         repository.metadata = sample_metadata
 
-        mock_fc_repo.save.return_value = [SentFileMessage(message_id=456, size=1024)]
+        store.upload.return_value = [SentFileMessage(message_id=456, size=1024)]
 
         await repository.push()
 
-        mock_fc_repo.save.assert_called_once()
-        call_args = mock_fc_repo.save.call_args[0][0]
+        store.upload.assert_called_once()
+        call_args = store.upload.call_args[0][0]
         assert isinstance(call_args, FileMessageFromBuffer)
         assert call_args.name == "metadata.json"
         assert json.loads(call_args.buffer.decode()) == sample_metadata.to_dict()
 
-        mock_message_api.pin_message.assert_called_once_with(message_id=456)
+        store.pin_message.assert_called_once_with(message_id=456)
         assert repository._message_id == 456
 
     @pytest.mark.asyncio
-    async def test_push_existing_metadata_updates_message(
-        self, repository, mock_message_api, mock_fc_repo, sample_metadata
+    async def test_push_existing_metadata_replaces_document(
+        self, repository, store, sample_metadata
     ):
         repository.metadata = sample_metadata
         repository._message_id = 789
 
         await repository.push()
 
-        mock_fc_repo.update.assert_called_once_with(
+        store.replace_document.assert_called_once_with(
             789, json.dumps(sample_metadata.to_dict()).encode(), "metadata.json"
         )
-        mock_message_api.pin_message.assert_not_called()
-        mock_fc_repo.save.assert_not_called()
+        store.pin_message.assert_not_called()
+        store.upload.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_read_all_single_chunk(self, repository):
-        async def mock_async_iter():
-            yield b"test data chunk"
-
-        result = await repository._read_all(mock_async_iter())
-
-        assert result == b"test data chunk"
-
-    @pytest.mark.asyncio
-    async def test_read_all_multiple_chunks(self, repository):
-        async def mock_async_iter():
-            yield b"chunk1"
-            yield b"chunk2"
-            yield b"chunk3"
-
-        result = await repository._read_all(mock_async_iter())
-
-        assert result == b"chunk1chunk2chunk3"
-
-    @pytest.mark.asyncio
-    async def test_read_all_empty_iterator(self, repository):
-        async def mock_async_iter():
-            yield b""
-
-        result = await repository._read_all(mock_async_iter())
-
-        assert result == b""
-
-    @pytest.mark.asyncio
-    async def test_new_metadata_creates_and_returns_pinned_message(
-        self, repository, mock_message_api, mock_fc_repo, sample_pinned_message
+    async def test_push_encrypts_the_blob_when_crypto_is_set(
+        self, store, sample_metadata
     ):
-        mock_fc_repo.save.return_value = [SentFileMessage(message_id=123, size=1024)]
-        mock_message_api.get_pinned_message.return_value = sample_pinned_message
+        crypto = MetadataCrypto(b"k" * 32, 64)
+        repository = PinnedMessageMetadataRepository(store, crypto=crypto)
+        repository.metadata = sample_metadata
 
-        result = await repository.new_metadata()
+        store.upload.return_value = [SentFileMessage(message_id=1, size=1)]
 
-        assert repository.metadata is not None
-        assert isinstance(repository.metadata.dir, TGFSDirectory)
-        # After new_metadata() is called, the message_id should be set after the push operation
+        await repository.push()
 
-        mock_fc_repo.save.assert_called_once()
-        mock_message_api.pin_message.assert_called_once_with(message_id=123)
-        mock_message_api.get_pinned_message.assert_called_once()
+        blob = store.upload.call_args[0][0].buffer
+        assert blob != json.dumps(sample_metadata.to_dict()).encode()
+        assert json.loads(crypto.decrypt(blob)) == sample_metadata.to_dict()
 
-        assert result == sample_pinned_message
+    @pytest.mark.asyncio
+    async def test_push_refuses_a_blob_that_does_not_fit_one_message(
+        self, repository, store, sample_metadata
+    ):
+        store.caps = StoreCapabilities(
+            max_part_bytes=16, max_text_chars=4096, supports_server_copy=True
+        )
+        repository.metadata = sample_metadata
+
+        with pytest.raises(Exception, match="does not fit one message"):
+            await repository.push()
+        store.upload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_with_existing_pinned_message(
-        self,
-        repository,
-        mock_message_api,
-        mock_fc_repo,
-        sample_pinned_message,
-        sample_metadata,
+        self, repository, store, sample_pinned_message, sample_metadata
     ):
-        mock_message_api.get_pinned_message.return_value = sample_pinned_message
-
-        async def mock_content_iterator():
-            yield json.dumps(sample_metadata.to_dict()).encode()
-
-        mock_fc_repo.get.return_value = mock_content_iterator()
+        store.get_pinned_message.return_value = sample_pinned_message
+        store.download_file.return_value = _Chunks(
+            json.dumps(sample_metadata.to_dict()).encode()
+        )
 
         result = await repository.get()
 
-        mock_message_api.get_pinned_message.assert_called_once()
-        mock_fc_repo.get.assert_called_once()
-
-        call_args = mock_fc_repo.get.call_args
-        temp_fv = call_args[0][0]
-        assert isinstance(temp_fv, TGFSFileVersion)
-        assert 123 in temp_fv.message_ids
-        assert temp_fv.size == 1024
-        assert call_args[1]["begin"] == 0
-        assert call_args[1]["end"] == -1
-        assert call_args[1]["name"] == "metadata.json"
+        store.get_pinned_message.assert_called_once()
+        store.download_file.assert_called_once_with(123, 0, 1023)
 
         assert isinstance(result, TGFSMetadata)
         assert repository._message_id == 123
 
     @pytest.mark.asyncio
+    async def test_get_decrypts_the_blob_when_crypto_is_set(
+        self, store, sample_pinned_message, sample_metadata
+    ):
+        crypto = MetadataCrypto(b"k" * 32, 64)
+        repository = PinnedMessageMetadataRepository(store, crypto=crypto)
+        store.get_pinned_message.return_value = sample_pinned_message
+        store.download_file.return_value = _Chunks(
+            crypto.encrypt(json.dumps(sample_metadata.to_dict()).encode())
+        )
+
+        result = await repository.get()
+
+        assert isinstance(result, TGFSMetadata)
+
+    @pytest.mark.asyncio
     async def test_get_without_pinned_message_creates_new(
-        self, repository, mock_message_api, mock_fc_repo, sample_pinned_message
+        self, repository, store, sample_pinned_message
     ):
         # First call raises NoPinnedMessage, second call returns the message
-        mock_message_api.get_pinned_message.side_effect = [
+        store.get_pinned_message.side_effect = [
             NoPinnedMessage(),
             sample_pinned_message,
         ]
-        mock_fc_repo.save.return_value = [SentFileMessage(message_id=123, size=1024)]
+        store.upload.return_value = [SentFileMessage(message_id=123, size=1024)]
 
         async def mock_content_iterator():
-            # Return minimal metadata for new metadata
             root_dir = TGFSDirectory.root_dir()
             metadata = TGFSMetadata(root_dir)
             yield json.dumps(metadata.to_dict()).encode()
 
-        mock_fc_repo.get.return_value = mock_content_iterator()
+        store.download_file.return_value = _Chunks(
+            json.dumps(TGFSMetadata(TGFSDirectory.root_dir()).to_dict()).encode()
+        )
 
         result = await repository.get()
 
-        assert mock_message_api.get_pinned_message.call_count == 2
-        mock_fc_repo.save.assert_called_once()
-        mock_message_api.pin_message.assert_called_once()
-        mock_fc_repo.get.assert_called_once()
+        assert store.get_pinned_message.call_count == 2
+        store.upload.assert_called_once()
+        store.pin_message.assert_called_once_with(message_id=123)
+        store.download_file.assert_called_once()
 
         assert isinstance(result, TGFSMetadata)
         assert repository._message_id == 123
 
     @pytest.mark.asyncio
     async def test_get_handles_complex_metadata_structure(
-        self, repository, mock_message_api, mock_fc_repo, sample_pinned_message
+        self, repository, store, sample_pinned_message
     ):
         # Create a more complex metadata structure
         root_dir = TGFSDirectory.root_dir()
@@ -223,12 +209,10 @@ class TestPinnedMessageMetadataRepository:
         root_dir.create_dir("subdir2")
         complex_metadata = TGFSMetadata(root_dir)
 
-        mock_message_api.get_pinned_message.return_value = sample_pinned_message
-
-        async def mock_content_iterator():
-            yield json.dumps(complex_metadata.to_dict()).encode()
-
-        mock_fc_repo.get.return_value = mock_content_iterator()
+        store.get_pinned_message.return_value = sample_pinned_message
+        store.download_file.return_value = _Chunks(
+            json.dumps(complex_metadata.to_dict()).encode()
+        )
 
         result = await repository.get()
 
@@ -239,19 +223,13 @@ class TestPinnedMessageMetadataRepository:
 
     @pytest.mark.asyncio
     async def test_push_and_get_integration(
-        self,
-        repository,
-        mock_message_api,
-        mock_fc_repo,
-        sample_metadata,
-        sample_pinned_message,
+        self, repository, store, sample_metadata, sample_pinned_message
     ):
         # Test the full cycle: push metadata and then retrieve it
         repository.metadata = sample_metadata
 
-        # Mock save and pin operations
-        mock_fc_repo.save.return_value = [SentFileMessage(message_id=999, size=2048)]
-        mock_message_api.get_pinned_message.return_value = MessageRespWithDocument(
+        store.upload.return_value = [SentFileMessage(message_id=999, size=2048)]
+        store.get_pinned_message.return_value = MessageRespWithDocument(
             message_id=999,
             text="",
             document=Document(
@@ -267,10 +245,9 @@ class TestPinnedMessageMetadataRepository:
         await repository.push()
 
         # Mock the content retrieval for get operation
-        async def mock_content_iterator():
-            yield json.dumps(sample_metadata.to_dict()).encode()
-
-        mock_fc_repo.get.return_value = mock_content_iterator()
+        store.download_file.return_value = _Chunks(
+            json.dumps(sample_metadata.to_dict()).encode()
+        )
 
         # Clear the in-memory metadata to test retrieval
         repository.metadata = None
@@ -285,7 +262,7 @@ class TestPinnedMessageMetadataRepository:
 
     @pytest.mark.asyncio
     async def test_multiple_pushes_update_existing_message(
-        self, repository, mock_message_api, mock_fc_repo, sample_metadata
+        self, repository, store, sample_metadata
     ):
         # Set up initial state
         repository.metadata = sample_metadata
@@ -293,20 +270,68 @@ class TestPinnedMessageMetadataRepository:
 
         # First push (update)
         await repository.push()
-        mock_fc_repo.update.assert_called_once_with(
+        store.replace_document.assert_called_once_with(
             555, json.dumps(sample_metadata.to_dict()).encode(), "metadata.json"
         )
 
         # Reset mock
-        mock_fc_repo.reset_mock()
+        store.reset_mock()
 
         # Modify metadata and push again
         sample_metadata.dir.create_dir("new_dir")
         await repository.push()
 
-        # Should call update again, not save
-        mock_fc_repo.update.assert_called_once_with(
+        # Should call replace_document again, not upload
+        store.replace_document.assert_called_once_with(
             555, json.dumps(sample_metadata.to_dict()).encode(), "metadata.json"
         )
-        mock_fc_repo.save.assert_not_called()
-        mock_message_api.pin_message.assert_not_called()
+        store.upload.assert_not_called()
+        store.pin_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_primary_store_without_a_mirror_group_does_not_mirror(
+        self, repository, store, sample_metadata
+    ):
+        repository.metadata = sample_metadata
+        repository._message_id = 1
+
+        await repository.push()
+
+        store.upload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_mirror_store_entry_leaves_the_promotion_copy_alone(
+        self, store, mocker, sample_metadata
+    ):
+        """An entry pinned to a mirror store is itself the redundant
+        copy: the primary's promotion copy must skip that store."""
+        from tgdcfs.core.mirror import MirrorGroup, MirrorStore
+
+        primary = mocker.AsyncMock(spec=TelegramStore)
+        primary.key = "tg:111"
+        primary.caps = StoreCapabilities(
+            max_part_bytes=1 << 30, max_text_chars=4096, supports_server_copy=True
+        )
+        store.key = "dc:222"
+        mirror_group = MirrorGroup(
+            primary=primary,
+            stores=[MirrorStore(key="dc:222", store=store)],
+            mode="auto",
+            strict=False,
+        )
+
+        repository = PinnedMessageMetadataRepository(
+            store, mirror_group=mirror_group
+        )
+        promotion = mocker.patch.object(
+            mirror_group, "mirror_pinned", new_callable=mocker.AsyncMock
+        )
+        repository.metadata = sample_metadata
+        repository._message_id = 1
+
+        await repository.push()
+
+        # The blob went to this entry's store, and the primary's
+        # promotion copy never ran.
+        store.replace_document.assert_called_once()
+        promotion.assert_not_called()

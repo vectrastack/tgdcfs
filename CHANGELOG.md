@@ -16,6 +16,39 @@ the fact on the commits that shipped them.
 
 ## [Unreleased]
 
+### Added
+
+- **Metadata redundancy.** A file system's `metadata` block takes a list
+  now: every entry is a full copy of the directory tree (a pinned message
+  in the primary store, one in a mirror, a GitHub repo, a GitLab repo),
+  kept in step the same way files are mirrored across stores. The first
+  entry that can be read at boot is the tree of record, every change is
+  written to all of them, and an entry that is temporarily unreachable is
+  marked stale and caught up from the tree of record on the next write and
+  by a periodic resync (every 5 minutes) -- so a store that comes back is
+  healed without any manual action. The historical single-mapping form
+  still loads as a one-entry list, and a missing block still defaults to
+  a pinned message in the primary.
+- **Pinned messages per store.** A `pinned_message` entry takes a `store`
+  (the primary by default, any of the file system's mirrors otherwise), so
+  a Telegram pinned message and a Discord pinned message are configured
+  and treated as two separate, independently failing copies. A store with
+  its own pinned entry is skipped by the automatic promotion copy of the
+  pinned message, so one channel never holds two pinned metadata
+  documents.
+- **GitLab as a metadata backend.** `metadata.gitlab_repo` holds the tree
+  as one JSON file on a branch of a GitLab project (gitlab.com or a
+  private installation via `url`), and is a full member of a metadata
+  redundancy set.
+- A GitHub repo in a redundancy set survives an outage without losing
+  writes: failed writes are absorbed while another entry is the tree of
+  record, and the repo is rebuilt from it in one commit when GitHub
+  answers again, after which the in-memory tree is re-wrapped and commits
+  to GitHub directly again. A repo that cannot be read at boot is now an
+  error instead of an empty file system.
+- `GET /api/filesystems` reports the configured `metadata` list and each
+  entry's `active`/`stale` health (`metadata_health`).
+
 ### Fixed
 
 - The Docker image names in the config generator's command panel and in

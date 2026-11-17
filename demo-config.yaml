@@ -82,17 +82,37 @@ filesystems:
     # write_ack: primary
     # read_parallel: false
     # read_sources: []
+    # The metadata redundancy set: every entry is a full copy of the
+    # directory tree. The first entry that can be read at boot wins and
+    # every change is written to all of them; an entry that is
+    # temporarily unreachable is caught up when it answers again. A
+    # single object (type + settings) still works too.
     metadata:
-      type: github_repo
-      github_repo:
-        repo: 'tgdcfs-demo/tgdcfs-demo'
-        commit: 'master'
-        access_token: hidden
-        # How many directories the startup reads in parallel when the
-        # metadata repo is too big for one recursive tree call (default
-        # 8). Higher is faster but bursts harder against GitHub's rate
-        # limit.
-        # tree_fetch_concurrency: 8
+      - type: pinned_message
+        # store: demo   # the primary by default; a mirror works too
+      # A second pinned entry names its own store, which is how a
+      # Telegram pinned message and a Discord pinned message are
+      # configured as two separate redundant copies:
+      # - type: pinned_message
+      #   store: demo-mirror   # or demo-discord
+      # A GitHub repo and a GitLab repo hold the tree as a whole:
+      - type: github_repo
+        github_repo:
+          repo: 'tgdcfs-demo/tgdcfs-demo'
+          commit: 'master'
+          access_token: hidden
+          # How many directories the startup reads in parallel when the
+          # metadata repo is too big for one recursive tree call (default
+          # 8). Higher is faster but bursts harder against GitHub's rate
+          # limit.
+          # tree_fetch_concurrency: 8
+      - type: gitlab_repo
+        gitlab_repo:
+          repo: 'tgdcfs-demo/tgdcfs-demo'
+          branch: 'main'
+          access_token: hidden
+          # A private GitLab installation works too.
+          # url: 'https://gitlab.example.com'
 
 tgdcfs:
   users:

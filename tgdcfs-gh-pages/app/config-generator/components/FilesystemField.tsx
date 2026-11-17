@@ -1,4 +1,4 @@
-import { Delete } from "@mui/icons-material";
+import { Add, Delete } from "@mui/icons-material";
 import {
   Box,
   Button,
@@ -15,6 +15,7 @@ import {
 } from "@mui/material";
 import {
   FilesystemConfig,
+  MetadataEntry,
   MetadataType,
   MirrorMode,
   StoreConfig,
@@ -30,10 +31,6 @@ interface FilesystemFieldProps {
   onUpdate: <K extends keyof FilesystemConfig>(
     field: K,
     value: FilesystemConfig[K]
-  ) => void;
-  onUpdateGitHubRepo: (
-    field: keyof FilesystemConfig["metadata"]["github_repo"],
-    value: string
   ) => void;
   onDelete?: () => void;
   nameErrors?: string[];
@@ -52,7 +49,6 @@ export function FilesystemField({
   filesystem,
   stores,
   onUpdate,
-  onUpdateGitHubRepo,
   onDelete,
   nameErrors = [],
   primaryErrors = [],
@@ -65,6 +61,55 @@ export function FilesystemField({
     (s) => s.name !== filesystem.primary
   );
   const reuploadMirror = needsReupload(filesystem, namedStores);
+  // The stores a pinned message may name: the primary and its mirrors.
+  const fsStoreNames = [filesystem.primary, ...filesystem.mirrors];
+
+  const updateEntry = (index: number, patch: Partial<MetadataEntry>) => {
+    onUpdate("metadata", [
+      ...filesystem.metadata.slice(0, index),
+      { ...filesystem.metadata[index], ...patch },
+      ...filesystem.metadata.slice(index + 1),
+    ]);
+  };
+  const removeEntry = (index: number) => {
+    onUpdate(
+      "metadata",
+      filesystem.metadata.filter((_, i) => i !== index)
+    );
+  };
+  const updateGitHubRepo = (
+    index: number,
+    field: "repo" | "commit" | "access_token",
+    value: string
+  ) => {
+    const entry = filesystem.metadata[index];
+    updateEntry(index, {
+      github_repo: {
+        repo: "",
+        commit: "master",
+        access_token: "",
+        ...entry.github_repo,
+        [field]: value,
+      },
+    });
+  };
+  const updateGitlabRepo = (
+    index: number,
+    field: "repo" | "branch" | "access_token" | "url",
+    value: string
+  ) => {
+    const entry = filesystem.metadata[index];
+    updateEntry(index, {
+      gitlab_repo: {
+        repo: "",
+        branch: "main",
+        access_token: "",
+        url: "",
+        ...entry.gitlab_repo,
+        [field]: value,
+      },
+    });
+  };
 
   return (
     <Box sx={{ mb: 3, pb: 2, borderBottom: 1, borderColor: "divider" }}>
@@ -109,22 +154,6 @@ export function FilesystemField({
             </Typography>
           )}
         </FormControl>
-        <FormControl size="small" sx={{ minWidth: 200 }}>
-          <InputLabel>Metadata Type</InputLabel>
-          <Select
-            value={filesystem.metadata.type}
-            label="Metadata Type"
-            onChange={(e) =>
-              onUpdate("metadata", {
-                ...filesystem.metadata,
-                type: e.target.value as MetadataType,
-              })
-            }
-          >
-            <MenuItem value="pinned_message">Pinned Message</MenuItem>
-            <MenuItem value="github_repo">GitHub Repository</MenuItem>
-          </Select>
-        </FormControl>
         {onDelete && (
           <IconButton
             color="error"
@@ -137,59 +166,220 @@ export function FilesystemField({
         )}
       </Box>
 
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2, pl: 2 }}>
-        {filesystem.metadata.type === "pinned_message"
-          ? "The directory tree is kept as a JSON document pinned in the primary store and copied to every mirror. Never delete the pinned file or pin anything else. On a Discord primary the tree has to fit one attachment; use GitHub metadata for anything but small trees."
-          : "The directory tree is kept in a GitHub repository, so it survives even the loss of every store. Recommended whenever mirrors are configured."}
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+        Metadata (redundancy set)
       </Typography>
-
-      {filesystem.metadata.type === "github_repo" && (
-        <>
-          <Box
-            sx={{ display: "flex", alignItems: "flex-start", gap: 1, mb: 1 }}
-          >
-            <ConfigTextField
-              label="Repository"
-              value={filesystem.metadata.github_repo.repo}
-              onChange={(e) => onUpdateGitHubRepo("repo", e.target.value)}
-              helperText="Format: username/repository-name"
-              required
-              style={{ flex: 1 }}
-            />
-            <ConfigTextField
-              label="Commit/Branch"
-              value={filesystem.metadata.github_repo.commit}
-              onChange={(e) => onUpdateGitHubRepo("commit", e.target.value)}
-              width={200}
-            />
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1, pl: 2 }}>
+        Every entry below is a full copy of the directory tree, kept in step
+        like the files themselves: the first entry that can be read wins, and
+        a store that is temporarily unreachable is caught up when it answers
+        again. A pinned message names its own store, so a Telegram pinned
+        message and a Discord pinned message are two separate copies.
+      </Typography>
+      {filesystem.metadata.map((entry, entryIndex) => (
+        <Box
+          key={entryIndex}
+          sx={{
+            mb: 1.5,
+            p: 1.5,
+            pl: 2,
+            border: 1,
+            borderColor: "divider",
+            borderRadius: 1,
+          }}
+        >
+          <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
+            <FormControl size="small" sx={{ minWidth: 200 }}>
+              <InputLabel>Metadata Type</InputLabel>
+              <Select
+                value={entry.type}
+                label="Metadata Type"
+                onChange={(e) =>
+                  updateEntry(entryIndex, {
+                    type: e.target.value as MetadataType,
+                    ...(e.target.value === "github_repo"
+                      ? {
+                          github_repo:
+                            entry.github_repo ?? {
+                              repo: "",
+                              commit: "master",
+                              access_token: "",
+                            },
+                        }
+                      : {}),
+                    ...(e.target.value === "gitlab_repo"
+                      ? {
+                          gitlab_repo:
+                            entry.gitlab_repo ?? {
+                              repo: "",
+                              branch: "main",
+                              access_token: "",
+                              url: "",
+                            },
+                        }
+                      : {}),
+                  })
+                }
+              >
+                <MenuItem value="pinned_message">Pinned Message</MenuItem>
+                <MenuItem value="github_repo">GitHub Repository</MenuItem>
+                <MenuItem value="gitlab_repo">GitLab Repository</MenuItem>
+              </Select>
+            </FormControl>
+            {entry.type === "pinned_message" && (
+              <FormControl size="small" sx={{ minWidth: 200 }}>
+                <InputLabel>Pinned In Store</InputLabel>
+                <Select
+                  value={
+                    entry.store !== undefined &&
+                    fsStoreNames.includes(entry.store)
+                      ? entry.store
+                      : ""
+                  }
+                  label="Pinned In Store"
+                  onChange={(e) =>
+                    updateEntry(entryIndex, {
+                      store: e.target.value || undefined,
+                    })
+                  }
+                >
+                  <MenuItem value="">Primary store (default)</MenuItem>
+                  {fsStoreNames.map((name) => (
+                    <MenuItem key={name} value={name}>
+                      {name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
+            {filesystem.metadata.length > 1 && (
+              <IconButton
+                color="error"
+                onClick={() => removeEntry(entryIndex)}
+                sx={{ mt: 0.5 }}
+                size="small"
+              >
+                <Delete />
+              </IconButton>
+            )}
           </Box>
-          <Box
-            sx={{ display: "flex", alignItems: "flex-start", gap: 1, mb: 2 }}
-          >
-            <ConfigTextField
-              label="Access Token"
-              value={filesystem.metadata.github_repo.access_token}
-              onChange={(e) =>
-                onUpdateGitHubRepo("access_token", e.target.value)
-              }
-              type="password"
-              required
-              style={{ flex: 1 }}
-            />
-            <Button
-              variant="outlined"
-              component="a"
-              size="large"
-              href="https://github.com/settings/personal-access-tokens/new"
-              target="_blank"
-              rel="noopener noreferrer"
-              sx={{ textTransform: "none" }}
+          {entry.type === "pinned_message" && (
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", pl: 2, mt: 0.5 }}
             >
-              Get Token
-            </Button>
-          </Box>
-        </>
-      )}
+              The tree is a JSON document pinned in that store&rsquo;s channel. Never
+              delete the pinned file or pin anything else. On Discord the tree
+              has to fit one attachment; add a GitHub or GitLab copy for
+              anything but small trees.
+            </Typography>
+          )}
+          {entry.type === "github_repo" && (
+            <Box
+              sx={{ display: "flex", alignItems: "flex-start", gap: 1, mt: 1 }}
+            >
+              <ConfigTextField
+                label="Repository"
+                value={(entry.github_repo ?? { repo: "" }).repo}
+                onChange={(e) =>
+                  updateGitHubRepo(entryIndex, "repo", e.target.value)
+                }
+                helperText="Format: username/repository-name"
+                required
+                style={{ flex: 1 }}
+              />
+              <ConfigTextField
+                label="Commit/Branch"
+                value={(entry.github_repo ?? { commit: "master" }).commit}
+                onChange={(e) =>
+                  updateGitHubRepo(entryIndex, "commit", e.target.value)
+                }
+                width={200}
+              />
+              <ConfigTextField
+                label="Access Token"
+                value={(entry.github_repo ?? { access_token: "" }).access_token}
+                onChange={(e) =>
+                  updateGitHubRepo(entryIndex, "access_token", e.target.value)
+                }
+                type="password"
+                required
+                style={{ flex: 1 }}
+              />
+              <Button
+                variant="outlined"
+                component="a"
+                size="large"
+                href="https://github.com/settings/personal-access-tokens/new"
+                target="_blank"
+                rel="noopener noreferrer"
+                sx={{ textTransform: "none" }}
+              >
+                Get Token
+              </Button>
+            </Box>
+          )}
+          {entry.type === "gitlab_repo" && (
+            <Box
+              sx={{ display: "flex", alignItems: "flex-start", gap: 1, mt: 1 }}
+            >
+              <ConfigTextField
+                label="Project"
+                value={(entry.gitlab_repo ?? { repo: "" }).repo}
+                onChange={(e) =>
+                  updateGitlabRepo(entryIndex, "repo", e.target.value)
+                }
+                helperText="Format: group/project-name"
+                required
+                style={{ flex: 1 }}
+              />
+              <ConfigTextField
+                label="Branch"
+                value={(entry.gitlab_repo ?? { branch: "main" }).branch}
+                onChange={(e) =>
+                  updateGitlabRepo(entryIndex, "branch", e.target.value)
+                }
+                width={150}
+              />
+              <ConfigTextField
+                label="Access Token"
+                value={(entry.gitlab_repo ?? { access_token: "" })
+                  .access_token}
+                onChange={(e) =>
+                  updateGitlabRepo(entryIndex, "access_token", e.target.value)
+                }
+                type="password"
+                required
+                style={{ flex: 1 }}
+              />
+              <ConfigTextField
+                label="GitLab URL (optional)"
+                value={(entry.gitlab_repo ?? { url: "" }).url}
+                onChange={(e) =>
+                  updateGitlabRepo(entryIndex, "url", e.target.value)
+                }
+                helperText="A private installation; empty means gitlab.com"
+                style={{ flex: 1 }}
+              />
+            </Box>
+          )}
+        </Box>
+      ))}
+      <Button
+        startIcon={<Add />}
+        onClick={() =>
+          onUpdate("metadata", [
+            ...filesystem.metadata,
+            { type: "pinned_message" },
+          ])
+        }
+        variant="outlined"
+        size="small"
+        sx={{ textTransform: "none", mb: 2 }}
+      >
+        Add Metadata Copy
+      </Button>
 
       <Typography variant="subtitle2" sx={{ mb: 1 }}>
         Mirrors

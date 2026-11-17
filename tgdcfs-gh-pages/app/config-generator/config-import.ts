@@ -109,7 +109,11 @@ class Notes {
   }
 }
 
-const METADATA_TYPES: readonly MetadataType[] = ["pinned_message", "github_repo"];
+const METADATA_TYPES: readonly MetadataType[] = [
+  "pinned_message",
+  "github_repo",
+  "gitlab_repo",
+];
 const MIRROR_MODES: readonly MirrorMode[] = ["auto", "forward", "reupload"];
 const SYNC_MODES: readonly SyncMode[] = ["inline", "background", "tee"];
 const WRITE_ACKS: readonly WriteAck[] = ["primary", "cache"];
@@ -119,17 +123,60 @@ const readMetadata = (
   raw: unknown,
   notes: Notes
 ): FilesystemConfig["metadata"] => {
-  const data = asMapping(raw);
-  notes.unknownKeys(path, data, ["name", "type", "github_repo"]);
-  const github = asMapping(data.github_repo);
-  return {
-    type: notes.choice(`${path}.type`, data.type, METADATA_TYPES, "pinned_message"),
-    github_repo: {
-      repo: asString(github.repo),
-      commit: asString(github.commit, "master"),
-      access_token: asString(github.access_token),
-    },
-  };
+  // A list configures the redundancy set; a single mapping is the
+  // historical form and becomes a one-entry list.
+  const items: unknown[] = Array.isArray(raw)
+    ? raw
+    : raw !== undefined && raw !== null
+      ? [raw]
+      : [];
+  const entries = items.map((item, i) => {
+    const data = asMapping(item);
+    const entryPath = Array.isArray(raw) ? `${path}[${i}]` : path;
+    notes.unknownKeys(entryPath, data, [
+      "name",
+      "type",
+      "store",
+      "github_repo",
+      "gitlab_repo",
+    ]);
+    const type = notes.choice(
+      `${entryPath}.type`,
+      data.type,
+      METADATA_TYPES,
+      "pinned_message"
+    );
+    const github = asMapping(data.github_repo);
+    const gitlab = asMapping(data.gitlab_repo);
+    return {
+      type,
+      ...(type === "pinned_message" && data.store
+        ? { store: asString(data.store).trim() }
+        : {}),
+      ...(type === "github_repo"
+        ? {
+            github_repo: {
+              repo: asString(github.repo),
+              commit: asString(github.commit, "master"),
+              access_token: asString(github.access_token),
+            },
+          }
+        : {}),
+      ...(type === "gitlab_repo"
+        ? {
+            gitlab_repo: {
+              repo: asString(gitlab.repo),
+              branch: asString(gitlab.branch, "main"),
+              access_token: asString(gitlab.access_token),
+              url: asString(gitlab.url),
+            },
+          }
+        : {}),
+    };
+  });
+  // No metadata at all: the primary's pinned message, as the loader
+  // defaults to.
+  return entries.length > 0 ? entries : [{ type: "pinned_message" }];
 };
 
 // ``stores`` and ``filesystems`` as written today.

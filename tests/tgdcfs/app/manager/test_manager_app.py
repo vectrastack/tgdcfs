@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+
 from tgdcfs.app.manager.app import create_manager_app
 from tgdcfs.backends.base import StoreCapabilities
 from tgdcfs.config import Config
@@ -10,6 +11,14 @@ class TestManagerApp:
     @pytest.fixture
     def mock_client(self, mocker):
         client = mocker.Mock(spec=Client)
+        client.metadata_api = mocker.Mock()
+        client.metadata_api.health.return_value = [
+            {
+                "label": "PinnedMessageMetadataRepository",
+                "active": True,
+                "stale": False,
+            }
+        ]
         client.store = mocker.Mock()
         client.store.key = "tg:123456"
         client.store.get_messages = mocker.AsyncMock()
@@ -85,7 +94,14 @@ class TestManagerApp:
                 "read_parallel": False,
                 "read_sources": [],
                 "write_ack": "primary",
-                "metadata": "pinned_message",
+                "metadata": [{"type": "pinned_message"}],
+                "metadata_health": [
+                    {
+                        "label": "PinnedMessageMetadataRepository",
+                        "active": True,
+                        "stale": False,
+                    }
+                ],
                 "primary_dead": False,
             }
         }

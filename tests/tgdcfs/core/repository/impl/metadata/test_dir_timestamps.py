@@ -1,8 +1,8 @@
 import datetime
 import json
+from unittest.mock import Mock, patch
 
 import pytest
-from unittest.mock import Mock, patch
 from github.Repository import Repository
 
 from tgdcfs.core.repository.impl.metadata.github_repo.dir_timestamps import (

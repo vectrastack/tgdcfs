@@ -15,6 +15,7 @@ from typing import cast
 
 import pytest
 
+from tests.fakes.store import FakeStore
 from tgdcfs.backends.base import IStore
 from tgdcfs.config import CacheConfig
 from tgdcfs.core.api import DirectoryApi, FileApi, FileDescApi, MetaDataApi
@@ -36,7 +37,6 @@ from tgdcfs.core.repository.impl import (
 )
 from tgdcfs.crypto.repository import EncryptingFileContentRepository
 from tgdcfs.reqres import FileMessageFromBuffer
-from tests.fakes.store import FakeStore
 
 BLOCK = 64 * 1024  # the smallest block the config accepts
 
@@ -613,7 +613,7 @@ class Stack:
             local_versions=cache.complete if cache is not None else None,
         )
         self.metadata_repo = PinnedMessageMetadataRepository(
-            primary, self.fc_repo, mirror_group=self.mirror_group
+            primary, mirror_group=self.mirror_group
         )
         self.metadata_api = MetaDataApi(self.metadata_repo)
         self.queue = queue

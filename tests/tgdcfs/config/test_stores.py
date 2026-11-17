@@ -70,8 +70,8 @@ class TestFilesystemConfig:
         assert fs.sync == "inline"
         assert fs.strict is False
         assert fs.read_preference == []
-        assert fs.metadata.type == MetadataType.PINNED_MESSAGE
-        assert fs.metadata.name == "media"
+        assert fs.metadata[0].type == MetadataType.PINNED_MESSAGE
+        assert fs.metadata[0].name == "media"
         assert fs.store_names == ["tg-main"]
 
     def test_github_metadata(self):
@@ -89,9 +89,9 @@ class TestFilesystemConfig:
                 },
             },
         )
-        assert fs.metadata.type == MetadataType.GITHUB_REPO
-        assert fs.metadata.github_repo is not None
-        assert fs.metadata.github_repo.repo == "o/r"
+        assert fs.metadata[0].type == MetadataType.GITHUB_REPO
+        assert fs.metadata[0].github_repo is not None
+        assert fs.metadata[0].github_repo.repo == "o/r"
 
     def test_primary_required(self):
         with pytest.raises(ValueError, match="primary"):
@@ -321,7 +321,7 @@ class TestCurrentLayout:
         fs = config.filesystems["media"]
         assert fs.primary == "tg-main"
         assert fs.mirrors == ["tg-spare"]
-        assert fs.metadata.name == "media"
+        assert fs.metadata[0].name == "media"
         assert config.telegram.api_id == 12345
         assert config.telegram.private_file_channel == []
         assert config.uses_backend == {"telegram": True, "discord": False}
@@ -491,9 +491,9 @@ class TestLegacyLayout:
         assert media.primary == "tg--1001"
         assert media.mirrors == []
         assert media.mode == "auto"
-        assert media.metadata.type == MetadataType.PINNED_MESSAGE
+        assert media.metadata[0].type == MetadataType.PINNED_MESSAGE
         notes = config.filesystems["notes"]
-        assert notes.metadata.type == MetadataType.GITHUB_REPO
+        assert notes.metadata[0].type == MetadataType.GITHUB_REPO
         # The legacy fields stay readable for code that still looks there.
         assert config.telegram.private_file_channel == ["-1001", "-1002"]
 

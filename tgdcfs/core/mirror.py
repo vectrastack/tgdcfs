@@ -497,7 +497,10 @@ class MirrorGroup:
     # -- pinned metadata ---------------------------------------------------
 
     async def mirror_pinned(
-        self, primary_message_id: int, state: Dict[str, int]
+        self,
+        primary_message_id: int,
+        state: Dict[str, int],
+        skip: Optional[set[str]] = None,
     ) -> None:
         """Maintain a pinned copy of the metadata document in each mirror.
 
@@ -506,9 +509,16 @@ class MirrorGroup:
         current metadata message id in that store and is updated in
         place. The blob fits one message of every store, the metadata
         repository checks that before writing it.
+
+        ``skip`` names stores that keep their own pinned metadata
+        through a separate metadata entry; they are left alone, because a
+        second pinned metadata document in one channel would be ambiguous
+        to read back.
         """
         size: Optional[int] = None
         for ch in self._stores:
+            if skip and ch.key in skip:
+                continue
             try:
                 if ch.store.backend != self._primary.backend:
                     if size is None:
@@ -534,25 +544,6 @@ class MirrorGroup:
                 state[ch.key] = new_id
             except Exception as ex:
                 self._handle_write_error(ch.key, "pinned metadata", ex)
-
-    async def adopt_pinned(
-        self, new_ids: Dict[str, int], state: Dict[str, int]
-    ) -> None:
-        """Pin already-mirrored metadata copies (no copying needed).
-
-        Used right after ``save`` has replicated the metadata blob as
-        ordinary content: ``new_ids`` are the fresh copies per store.
-        """
-        for store_key, new_id in new_ids.items():
-            if (ch := self._by_key.get(store_key)) is None or new_id <= 0:
-                continue
-            try:
-                await ch.store.pin_message(new_id)
-                if (old := state.get(store_key)) and old != new_id:
-                    await ch.store.delete_messages([old], force=True)
-                state[store_key] = new_id
-            except Exception as ex:
-                self._handle_write_error(store_key, "pinned metadata", ex)
 
     # -- deletion ----------------------------------------------------------
 

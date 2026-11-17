@@ -372,7 +372,7 @@ class Stack:
         self.fd_repo = StoreFDRepository(primary, mirror_group=self.mirror_group)
         self.metadata_api = MetaDataApi(
             PinnedMessageMetadataRepository(
-                primary, self.fc_repo, mirror_group=self.mirror_group
+                primary, mirror_group=self.mirror_group
             )
         )
         self.queue = queue

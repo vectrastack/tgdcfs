@@ -11,7 +11,23 @@ export interface StoreConfig {
   channel: string;
 }
 
-export type MetadataType = "pinned_message" | "github_repo";
+export type MetadataType = "pinned_message" | "github_repo" | "gitlab_repo";
+
+// One copy of the directory tree in the metadata redundancy set.
+export interface MetadataEntry {
+  type: MetadataType;
+  // pinned_message only: the store (as named in stores) that holds the
+  // pinned metadata document. The primary by default.
+  store?: string;
+  github_repo?: { repo: string; commit: string; access_token: string };
+  gitlab_repo?: {
+    repo: string;
+    branch: string;
+    access_token: string;
+    // A private installation; empty means gitlab.com.
+    url?: string;
+  };
+}
 export type MirrorMode = "auto" | "forward" | "reupload";
 export type SyncMode = "inline" | "background" | "tee";
 // When a write is answered: once the primary store has it, or once the
@@ -31,14 +47,7 @@ export interface FilesystemConfig {
   read_parallel: boolean;
   read_sources: string[];
   allow_shared_store: boolean;
-  metadata: {
-    type: MetadataType;
-    github_repo: {
-      repo: string;
-      commit: string;
-      access_token: string;
-    };
-  };
+  metadata: MetadataEntry[];
 }
 
 export interface DiscordConfig {
@@ -177,10 +186,7 @@ export const newFilesystem = (
   read_parallel: false,
   read_sources: [],
   allow_shared_store: false,
-  metadata: {
-    type: "pinned_message",
-    github_repo: { repo: "", commit: "master", access_token: "" },
-  },
+  metadata: [{ type: "pinned_message" }],
 });
 
 // The form as it opens: one Telegram store, one file system on it, and

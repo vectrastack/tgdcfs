@@ -5,6 +5,9 @@ from typing import cast
 
 import pytest
 
+from tests.fakes.store import FakeStore
+from tests.tgdcfs.config.test_stores import current_layout
+from tests.tgdcfs.core.test_local_cache import RecordingStore
 from tgdcfs.backends.base import IStore
 from tgdcfs.config import Config, FilesystemConfig
 from tgdcfs.core.api import DirectoryApi, FileApi, FileDescApi, MetaDataApi
@@ -17,9 +20,6 @@ from tgdcfs.core.repository.impl import (
 )
 from tgdcfs.errors import TechnicalError
 from tgdcfs.reqres import FileMessageFromBuffer
-from tests.fakes.store import FakeStore
-from tests.tgdcfs.config.test_stores import current_layout
-from tests.tgdcfs.core.test_local_cache import RecordingStore
 
 DATA = bytes(range(256)) * 40  # 10240 bytes
 
@@ -220,7 +220,7 @@ class Stack:
         self.fd_repo = StoreFDRepository(primary, mirror_group=self.mirror_group)
         self.metadata_api = MetaDataApi(
             PinnedMessageMetadataRepository(
-                primary, self.fc_repo, mirror_group=self.mirror_group
+                primary, mirror_group=self.mirror_group
             )
         )
         self.file_api = FileApi(

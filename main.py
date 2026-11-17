@@ -28,6 +28,11 @@ from tgdcfs.core.local_cache import CacheSweeper, LocalCache
 from tgdcfs.core.replication import ReplicationQueue, ReplicationWorker
 from tgdcfs.utils.message_cache import set_message_cache_size
 
+logger = logging.getLogger(__name__)
+
+# How often a redundant metadata set retries the stores that fell behind.
+METADATA_RESYNC_INTERVAL = 300.0
+
 
 async def create_store_factory(config: Config) -> StoreFactory:
     """Log in to every backend the config uses and return the factory
@@ -76,6 +81,32 @@ async def create_clients(
             cache=cache,
         )
     return clients
+
+
+def start_metadata_resync(clients: Clients) -> Optional[asyncio.Task]:
+    """The periodic catch-up of metadata stores that fell behind.
+
+    A store that was down while a redundant metadata set kept working
+    is brought back in step here, without waiting for the next write.
+    """
+    resyncs = [
+        client.metadata_api.resync
+        for client in clients.values()
+        if client.has_redundant_metadata and client.metadata_api is not None
+    ]
+    if not resyncs:
+        return None
+
+    async def loop() -> None:
+        while True:
+            await asyncio.sleep(METADATA_RESYNC_INTERVAL)
+            for resync in resyncs:
+                try:
+                    await resync()
+                except Exception as ex:
+                    logger.warning("Metadata resync failed: %s", ex)
+
+    return asyncio.create_task(loop())
 
 
 def start_cache_sweeper(
@@ -137,6 +168,7 @@ async def main():
 
     app = create_app(clients, config, replication=replication, cache=cache)
     sweeper = start_cache_sweeper(cache, replication)
+    resync = start_metadata_resync(clients)
 
     try:
         sftp_acceptor = await start_sftp_server(clients, config)
@@ -159,6 +191,8 @@ async def main():
             await client.file_api.stats.close()
         if sweeper is not None:
             await sweeper.stop()
+        if resync is not None:
+            resync.cancel()
         if sftp_acceptor:
             sftp_acceptor.close()
             await sftp_acceptor.wait_closed()

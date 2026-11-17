@@ -75,11 +75,22 @@ Returns an object keyed by file system name with primary/mirror stores, mirrorin
     "read_parallel": true,
     "read_sources": ["tg-primary"],
     "write_ack": "primary",
-    "metadata": "github_repo",
+    "metadata": [
+      {"type": "pinned_message", "store": "tg-primary"},
+      {"type": "pinned_message", "store": "dc-mirror"},
+      {"type": "github_repo"}
+    ],
+    "metadata_health": [
+      {"label": "pinned_message:tg-primary", "active": true, "stale": false},
+      {"label": "pinned_message:dc-mirror", "active": false, "stale": false},
+      {"label": "github_repo:you/tgdcfs-metadata", "active": false, "stale": false}
+    ],
     "primary_dead": false
   }
 }
 ```
+
+`metadata` lists the file system's metadata redundancy set (every entry with its type and, for a pinned message, the store that holds it). `metadata_health` reports the state of every entry: `active` marks the entry the tree was loaded from, and `stale` an entry that failed and is still being caught up.
 
 ---
 

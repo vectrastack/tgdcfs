@@ -384,25 +384,6 @@ export default function ConfigGenerator() {
     updateConfig("filesystems", filesystems);
   };
 
-  const updateFilesystemGitHubRepo = (
-    index: number,
-    field: keyof FilesystemConfig["metadata"]["github_repo"],
-    value: string
-  ) => {
-    const filesystems = [...config.filesystems];
-    filesystems[index] = {
-      ...filesystems[index],
-      metadata: {
-        ...filesystems[index].metadata,
-        github_repo: {
-          ...filesystems[index].metadata.github_repo,
-          [field]: value,
-        },
-      },
-    };
-    updateConfig("filesystems", filesystems);
-  };
-
   const getFilesystemNameErrors = (index: number): string[] => {
     const errors: string[] = [];
     const name = config.filesystems[index].name;
@@ -479,8 +460,15 @@ export default function ConfigGenerator() {
         allow_shared_store?: boolean;
         metadata: {
           type: string;
+          store?: string;
           github_repo?: { repo: string; commit: string; access_token: string };
-        };
+          gitlab_repo?: {
+            repo: string;
+            branch: string;
+            access_token: string;
+            url?: string;
+          };
+        }[];
       };
     } = {};
     config.filesystems
@@ -516,19 +504,29 @@ export default function ConfigGenerator() {
               }
             : {}),
           ...(writeBack ? { write_ack: "cache" } : {}),
-          metadata: {
-            type: fs.metadata.type,
-            ...(fs.metadata.type === "github_repo"
-              ? { github_repo: fs.metadata.github_repo }
+          metadata: fs.metadata.map((entry) => ({
+            type: entry.type,
+            ...(entry.type === "pinned_message" && entry.store
+              ? { store: entry.store }
               : {}),
-          },
+            ...(entry.type === "github_repo" && entry.github_repo
+              ? { github_repo: entry.github_repo }
+              : {}),
+            ...(entry.type === "gitlab_repo" && entry.gitlab_repo
+              ? { gitlab_repo: entry.gitlab_repo }
+              : {}),
+          })),
         };
       });
 
-    const pinnedOnTelegram = config.filesystems.some(
-      (fs) =>
-        fs.metadata.type === "pinned_message" &&
-        config.stores.find((s) => s.name === fs.primary)?.backend === "telegram"
+    const pinnedOnTelegram = config.filesystems.some((fs) =>
+      fs.metadata.some(
+        (entry) =>
+          entry.type === "pinned_message" &&
+          config.stores.find(
+            (s) => s.name === (entry.store ?? fs.primary)
+          )?.backend === "telegram"
+      )
     );
 
     const configForYaml = {
@@ -830,9 +828,6 @@ export default function ConfigGenerator() {
                   stores={config.stores}
                   onUpdate={(field, value) =>
                     updateFilesystem(index, field, value)
-                  }
-                  onUpdateGitHubRepo={(field, value) =>
-                    updateFilesystemGitHubRepo(index, field, value)
                   }
                   onDelete={
                     config.filesystems.length > 1

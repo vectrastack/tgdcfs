@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 
+from tests.fakes.store import FakeStore
 from tgdcfs.backends.base import IStore
 from tgdcfs.core.api import DirectoryApi, FileApi, FileDescApi, MetaDataApi
 from tgdcfs.core.mirror import MirrorGroup, MirrorStore
@@ -20,7 +21,6 @@ from tgdcfs.core.repository.impl import (
     StoreFileContentRepository,
 )
 from tgdcfs.reqres import FileMessageFromBuffer
-from tests.fakes.store import FakeStore
 
 
 class Stack:
@@ -36,7 +36,7 @@ class Stack:
         self.fc_repo = StoreFileContentRepository(primary, mirror_group=self.group)
         self.fd_repo = StoreFDRepository(primary, mirror_group=self.group)
         self.metadata_repo = PinnedMessageMetadataRepository(
-            primary, self.fc_repo, mirror_group=self.group
+            primary, mirror_group=self.group
         )
         self.metadata_api = MetaDataApi(self.metadata_repo)
         self.file_api = FileApi(

@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from tgdcfs.app.fs_cache import gfc
 from tgdcfs.app.utils import split_global_path
-from tgdcfs.config import Config
+from tgdcfs.config import Config, MetadataType
 from tgdcfs.core import Clients
 from tgdcfs.core.backfill import backfill_mirrors, count_files, create_backfill_task
 from tgdcfs.core.local_cache import LocalCache
@@ -95,7 +95,25 @@ def create_manager_app(
                 "read_parallel": fs.read_parallel,
                 "read_sources": list(fs.read_sources),
                 "write_ack": fs.write_ack,
-                "metadata": fs.metadata.type.value,
+                # The metadata redundancy set: every entry with its type
+                # and, for a pinned message, the store that holds it.
+                "metadata": [
+                    {
+                        "type": entry.type.value,
+                        **(
+                            {"store": entry.store}
+                            if entry.type == MetadataType.PINNED_MESSAGE
+                            and entry.store
+                            else {}
+                        ),
+                    }
+                    for entry in fs.metadata
+                ],
+                "metadata_health": (
+                    client.metadata_api.health()
+                    if client is not None and client.metadata_api is not None
+                    else None
+                ),
                 "primary_dead": bool(
                     client
                     and client.mirror_group

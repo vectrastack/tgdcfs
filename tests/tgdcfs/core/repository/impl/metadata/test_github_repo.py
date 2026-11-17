@@ -1,18 +1,17 @@
 import base64
 import datetime
 import json
+from typing import List
+from unittest.mock import Mock, patch
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
-from typing import List
 from github import Github, GithubException
-from github.Repository import Repository
 from github.ContentFile import ContentFile
 from github.GitTreeElement import GitTreeElement
+from github.Repository import Repository
 
 from tgdcfs.config import GithubRepoConfig
 from tgdcfs.core.model import FileStat, TGFSDirectory, TGFSFileRef, TGFSMetadata
-from tgdcfs.errors import TechnicalError
 from tgdcfs.core.repository.impl.metadata.github_repo import (
     GithubRepoMetadataRepository,
 )
@@ -24,6 +23,7 @@ from tgdcfs.core.repository.impl.metadata.github_repo.gh_directory import (
     GithubConfig,
     GithubDirectory,
 )
+from tgdcfs.errors import TechnicalError
 
 
 def mock_tree(repo, paths, truncated=False):
@@ -1425,3 +1425,173 @@ class TestStatsFiles:
 
         assert ref.edit.call_count == 2
         assert repo.get_git_ref.call_count == 2
+
+
+class TestRestoreAndAdopt:
+    """The wholesale rebuild and the re-wrapping of a fallback tree --
+    the two halves of bringing a GitHub repo back in step."""
+
+    @pytest.fixture
+    def repository(self, mock_ghc, stub_timestamp_store):
+        """A repository around the mocked repo, with the writer that
+        restore uses mocked out to run inline."""
+        repo = GithubRepoMetadataRepository.__new__(
+            GithubRepoMetadataRepository
+        )
+        from tgdcfs.core.repository.interface import IMetaDataRepository
+
+        IMetaDataRepository.__init__(repo)
+        repo._stats_loads = {}
+        repo._tree_read_failed = False
+        repo._ghc = mock_ghc
+        repo._timestamps = stub_timestamp_store
+        return repo
+
+    @staticmethod
+    def _plain_tree():
+        """A tree as another metadata store would have loaded it: plain
+        directories, no GitHub objects anywhere."""
+        root = TGFSDirectory.root_dir()
+        photos = root.create_dir("photos")
+        photos.create_dir("2026")
+        photos.files.append(TGFSFileRef(message_id=1, name="a.txt", location=photos))
+        root.files.append(TGFSFileRef(message_id=2, name="b.txt", location=root))
+        return TGFSMetadata(root)
+
+    def test_adopt_wraps_a_plain_tree_and_keeps_the_refs(self, repository):
+        repository.metadata = self._plain_tree()
+        plain_root = repository.metadata.dir
+        plain_photos = plain_root.children[0]
+        ref = plain_photos.files[0]
+
+        assert repository.adopt() is True
+
+        wrapped_root = repository.metadata.dir
+        assert isinstance(wrapped_root, GithubDirectory)
+        assert isinstance(wrapped_root.children[0], GithubDirectory)
+        # The very same file ref, now pointing at the wrapped directory.
+        assert wrapped_root.children[0].files[0] is ref
+        assert ref.location is wrapped_root.children[0]
+        assert plain_root is not wrapped_root
+
+    def test_adopt_leaves_a_tree_of_its_own_alone(self, repository, mock_ghc):
+        repository.metadata = TGFSMetadata(
+            GithubDirectory(mock_ghc, "root", None)
+        )
+
+        assert repository.adopt() is False
+        assert isinstance(repository.metadata.dir, GithubDirectory)
+
+    def test_adopt_without_metadata_is_refused(self, repository):
+        assert repository.metadata is None
+        assert repository.adopt() is False
+
+    @pytest.mark.asyncio
+    async def test_restore_replaces_the_whole_repo_in_one_commit(
+        self, repository, mock_repo
+    ):
+        repository.metadata = self._plain_tree()
+
+        # The branch head the rebuild commits on top of.
+        ref = Mock()
+        ref.object.sha = "head-sha"
+        mock_repo.get_git_ref.return_value = ref
+        base_commit = Mock()
+        mock_repo.get_git_commit.return_value = base_commit
+        new_tree = Mock()
+        mock_repo.create_git_tree.return_value = new_tree
+        new_commit = Mock()
+        new_commit.sha = "new-sha"
+        mock_repo.create_git_commit.return_value = new_commit
+
+        # The write runs inline: no thread pool in the test.
+        async def inline_write(fn, *args):
+            return fn(*args)
+
+        repository._ghc.write = inline_write
+
+        await repository.restore()
+
+        mock_repo.get_git_ref.assert_called_once_with("heads/main")
+        (elements,) = mock_repo.create_git_tree.call_args[0]
+        paths = sorted(e._identity["path"] for e in elements)
+        assert paths == [
+            "b.txt.2",  # the root's file reference
+            "photos/.gitkeep",
+            "photos/2026/.gitkeep",
+            "photos/a.txt.1",  # the photos' file reference
+        ]
+        mock_repo.create_git_commit.assert_called_once_with(
+            "Restore the TGDCFS metadata tree", new_tree, [base_commit]
+        )
+        ref.edit.assert_called_once_with("new-sha")
+        # A successful rebuild clears the stale flag.
+        assert repository.is_stale is False
+
+    @pytest.mark.asyncio
+    async def test_restore_encrypts_the_names_when_a_key_is_set(
+        self, repository, mock_repo, mock_ghc
+    ):
+        mock_ghc.name_key = b"k" * 32
+        repository.metadata = self._plain_tree()
+
+        ref = Mock()
+        ref.object.sha = "head"
+        mock_repo.get_git_ref.return_value = ref
+        mock_repo.get_git_commit.return_value = Mock()
+        mock_repo.create_git_tree.return_value = Mock()
+        commit = Mock()
+        commit.sha = "s"
+        mock_repo.create_git_commit.return_value = commit
+
+        async def inline_write(fn, *args):
+            return fn(*args)
+
+        repository._ghc.write = inline_write
+
+        await repository.restore()
+
+        paths = [
+            e._identity["path"] for e in mock_repo.create_git_tree.call_args[0][0]
+        ]
+        assert all("photos" not in p and "a.txt" not in p for p in paths)
+
+    @pytest.mark.asyncio
+    async def test_restore_without_metadata_raises(self, repository):
+        from tgdcfs.errors import MetadataNotInitialized
+
+        with pytest.raises(MetadataNotInitialized):
+            await repository.restore()
+
+    @pytest.mark.asyncio
+    async def test_a_repo_that_cannot_be_read_is_an_error(
+        self, repository, mock_repo
+    ):
+        """A network failure must look like one, not like an empty file
+        system -- that is what lets the redundant wrapper fail over."""
+        mock_repo.get_git_tree.side_effect = GithubException(
+            502, "bad gateway", {}
+        )
+        mock_repo.get_contents.side_effect = GithubException(
+            502, "bad gateway", {}
+        )
+
+        with pytest.raises(TechnicalError, match="Could not read"):
+            await repository.get()
+
+    def test_a_transient_write_is_tolerated_when_redundant(self, mock_ghc):
+        mock_ghc.tolerate_write_failures = True
+
+        assert (
+            mock_ghc.tolerate("Creating directory", Exception("down"))
+            is True
+        )
+        assert mock_ghc.stale is True
+
+    def test_a_write_failure_is_raised_when_the_repo_is_alone(self, mock_ghc):
+        mock_ghc.tolerate_write_failures = False
+
+        assert (
+            mock_ghc.tolerate("Creating directory", Exception("down"))
+            is False
+        )

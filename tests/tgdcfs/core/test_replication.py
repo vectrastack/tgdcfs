@@ -9,8 +9,7 @@ and the queue drives all of it in the background.
 import json
 from typing import cast
 
-import pytest
-
+from tests.fakes.store import FakeStore
 from tgdcfs.backends.base import IStore
 from tgdcfs.core.api import DirectoryApi, FileApi, FileDescApi, MetaDataApi
 from tgdcfs.core.backfill import BackfillReport, backfill_file
@@ -28,7 +27,6 @@ from tgdcfs.core.repository.impl import (
     StoreFileContentRepository,
 )
 from tgdcfs.reqres import FileMessageFromBuffer, Replica
-from tests.fakes.store import FakeStore
 
 
 class Stack:
@@ -57,7 +55,7 @@ class Stack:
         )
         self.fd_repo = StoreFDRepository(primary, mirror_group=self.mirror_group)
         self.metadata_repo = PinnedMessageMetadataRepository(
-            primary, self.fc_repo, mirror_group=self.mirror_group
+            primary, mirror_group=self.mirror_group
         )
         self.metadata_api = MetaDataApi(self.metadata_repo)
         self.queue = queue

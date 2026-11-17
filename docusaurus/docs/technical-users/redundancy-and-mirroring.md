@@ -59,6 +59,39 @@ If a message chunk or store becomes unreachable (e.g. FloodWait rate limit or ne
 
 ---
 
+## Metadata Redundancy
+
+The files themselves already had this: the primary store and its mirrors each hold a copy, so one failing store never loses data. The metadata -- the directory tree, file references and stats -- can now have the same redundancy, configured as a list under `filesystems.<fs>.metadata`:
+
+```yaml
+filesystems:
+  media:
+    primary: tg-primary
+    mirrors:
+      - dc-mirror
+    metadata:
+      - type: pinned_message
+        store: tg-primary   # a Telegram pinned message
+      - type: pinned_message
+        store: dc-mirror    # a Discord pinned message
+      - type: github_repo
+        github_repo: { repo: "you/tgdcfs-metadata", commit: "master", access_token: "..." }
+      - type: gitlab_repo
+        gitlab_repo: { repo: "group/tgdcfs-metadata", branch: "main", access_token: "..." }
+```
+
+How it behaves:
+
+- **Reads fail over.** The first entry that can be read at boot is the tree of record. If an entry is unreachable, it is skipped and the next one answers.
+- **Writes fan out.** Every change is written to every entry. A single mapping instead of a list (the historical form) keeps working as a one-entry set.
+- **Outages are absorbed.** An entry that fails a write is marked stale and the file system keeps running on the others; the stale entry is caught up from the tree of record on the next write and by a periodic resync (every 5 minutes), so a store that comes back is healed without any manual action.
+- **Pinned messages are per store.** A `pinned_message` entry names its `store` (the primary by default, any of its mirrors otherwise), so a Telegram pinned message and a Discord pinned message are configured -- and treated -- as two separate, independently failing copies. A store with its own pinned entry is skipped by the automatic promotion copy of the pinned message.
+- **`github_repo` and `gitlab_repo`** each hold the tree as a whole (a git history of per-directory commits, and one JSON file on a branch respectively). A GitHub repo that missed writes during an outage is rebuilt from the tree of record in a single commit, after which writes commit to it directly again.
+
+The state of every entry is visible on the management API: `GET /api/filesystems` reports the configured `metadata` list and each entry's `active`/`stale` health.
+
+---
+
 ## Disaster Recovery / Promotion Runbook
 
 If a primary store channel is banned, deleted, or permanently lost, follow this step-by-step promotion runbook to swap a mirror store into the primary role:

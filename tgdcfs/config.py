@@ -192,46 +192,110 @@ class GithubRepoConfig:
         )
 
 
+@dataclass
+class GitlabRepoConfig:
+    """A GitLab project that holds the metadata as one JSON file.
+
+    ``url`` is the base URL of the GitLab instance, so a private
+    installation works next to gitlab.com. ``repo`` is the project id or
+    the full path (``group/project``); ``branch`` is the branch the file
+    lives on.
+    """
+
+    repo: str
+    branch: str
+    access_token: str
+    url: str = "https://gitlab.com"
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Self:
+        repo = str(data.get("repo") or "")
+        if not repo:
+            raise ValueError("metadata.gitlab_repo.repo is required")
+        branch = str(data.get("branch") or data.get("commit") or "main")
+        access_token = str(data.get("access_token") or "")
+        if not access_token:
+            raise ValueError("metadata.gitlab_repo.access_token is required")
+        return cls(
+            repo=repo,
+            branch=branch,
+            access_token=access_token,
+            url=str(data.get("url") or "https://gitlab.com").rstrip("/"),
+        )
+
+
 class MetadataType(Enum):
     PINNED_MESSAGE = "pinned_message"
     GITHUB_REPO = "github_repo"
+    GITLAB_REPO = "gitlab_repo"
 
 
-class MetadataConfigDict(TypedDict):
+class MetadataConfigDict(TypedDict, total=False):
     name: str
     type: str
+    store: Optional[str]
     github_repo: Optional[Dict]
+    gitlab_repo: Optional[Dict]
 
 
 @dataclass
 class MetadataConfig:
+    """One metadata store of a file system.
+
+    A file system takes a *list* of these; together they are the
+    metadata redundancy set. The first entry that can be read wins on
+    boot and every push fans out to all of them, so a store that is
+    temporarily unreachable neither stops the file system nor loses the
+    write -- it is brought back in step as soon as it answers again.
+
+    ``store`` only applies to ``pinned_message``: the store (as named in
+    ``stores``) whose channel holds the pinned metadata document. It
+    defaults to the file system's primary store, and may name any of its
+    mirrors -- which is how a Telegram pinned message and a Discord
+    pinned message are told apart and configured separately.
+    """
+
     name: str
     type: MetadataType
-    github_repo: Optional[GithubRepoConfig]
+    store: Optional[str] = None
+    github_repo: Optional[GithubRepoConfig] = None
+    gitlab_repo: Optional[GitlabRepoConfig] = None
 
     @classmethod
     def from_dict(cls, data: MetadataConfigDict) -> Self:
-        if (
-            data.get("type", MetadataType.PINNED_MESSAGE.value)
-            == MetadataType.PINNED_MESSAGE.value
-        ):
+        raw_type = data.get("type", MetadataType.PINNED_MESSAGE.value)
+        name = data.get("name", "default")
+        store = data.get("store")
+        if raw_type == MetadataType.PINNED_MESSAGE.value:
             return cls(
-                name=data.get("name", "default"),
+                name=name,
                 type=MetadataType.PINNED_MESSAGE,
-                github_repo=None,
+                store=str(store) if store else None,
             )
-        if data["type"] == MetadataType.GITHUB_REPO.value:
+        if raw_type == MetadataType.GITHUB_REPO.value:
             if not (gh_repo_config := data.get("github_repo")):
                 raise ValueError(
                     "GitHub repo configuration is required for GITHUB_REPO type"
                 )
             return cls(
-                name=data.get("name", "default"),
+                name=name,
                 type=MetadataType.GITHUB_REPO,
+                store=str(store) if store else None,
                 github_repo=GithubRepoConfig.from_dict(gh_repo_config),
             )
+        if raw_type == MetadataType.GITLAB_REPO.value:
+            if not (gl_repo_config := data.get("gitlab_repo")):
+                raise ValueError(
+                    "GitLab repo configuration is required for GITLAB_REPO type"
+                )
+            return cls(
+                name=name,
+                type=MetadataType.GITLAB_REPO,
+                store=str(store) if store else None,
+                gitlab_repo=GitlabRepoConfig.from_dict(gl_repo_config),
+            )
         raise ValueError(
-            f"Unknown metadata type: {data['type']}, available options: {', '.join(e.value for e in MetadataType)}"
+            f"Unknown metadata type: {raw_type}, available options: {', '.join(e.value for e in MetadataType)}"
         )
 
 
@@ -976,7 +1040,7 @@ class FilesystemConfig:
     sync: SyncMode
     strict: bool
     read_preference: List[str]
-    metadata: MetadataConfig
+    metadata: List[MetadataConfig]
     allow_shared_store: bool = False
     # True when ``sync`` was not configured and may be replaced by the
     # value derived from the stores.
@@ -1038,13 +1102,7 @@ class FilesystemConfig:
                 f"filesystems.{name}: 'strict: true' promises the mirror copy when "
                 f"the write is answered and cannot be combined with 'write_ack: cache'"
             )
-        metadata_data: MetadataConfigDict = {
-            "name": name,
-            "type": MetadataType.PINNED_MESSAGE.value,
-            "github_repo": None,
-        }
-        metadata_data.update(data.get("metadata") or {})  # type: ignore[typeddict-item]
-        metadata = MetadataConfig.from_dict(metadata_data)
+        metadata = _metadata_entries_from_config(name, data.get("metadata"))
         return cls(
             name=name,
             primary=str(primary),
@@ -1126,6 +1184,77 @@ class FilesystemConfig:
         )
 
 
+def _validate_metadata_entries(
+    fs: FilesystemConfig, stores: Dict[str, StoreConfig]
+) -> None:
+    """Check a file system's metadata redundancy list against its stores.
+
+    A pinned message lives in a store of this file system -- the primary
+    by default, or any of its mirrors, which is how a Telegram pinned
+    message and a Discord pinned message are configured separately. One
+    structural store (github_repo / gitlab_repo) of each kind is enough;
+    two of the same kind would only shadow each other.
+    """
+    structural: set[str] = set()
+    for entry in fs.metadata:
+        if entry.type is MetadataType.PINNED_MESSAGE:
+            store_name = entry.store or fs.primary
+            if store_name not in stores:
+                raise ValueError(
+                    f"filesystems.{fs.name}: metadata names store "
+                    f"'{store_name}', which is not configured"
+                )
+            if store_name not in fs.store_names:
+                raise ValueError(
+                    f"filesystems.{fs.name}: metadata names store "
+                    f"'{store_name}', which is neither this file system's "
+                    f"primary nor one of its mirrors"
+                )
+        else:
+            if entry.type.value in structural:
+                raise ValueError(
+                    f"filesystems.{fs.name}: metadata lists "
+                    f"{entry.type.value} twice; one such store is enough"
+                )
+            structural.add(entry.type.value)
+
+
+def _metadata_entries_from_config(
+    fs_name: str, raw: object
+) -> List[MetadataConfig]:
+    """Read a filesystem's ``metadata`` block into its redundancy list.
+
+    A single mapping (the historical form) becomes a one-entry list, so
+    existing configs keep loading unchanged; a list configures several
+    stores that are kept in step with each other.
+    """
+    entries: List[dict] = []
+    if isinstance(raw, list):
+        entries = [dict(e) for e in raw]
+    elif isinstance(raw, dict):
+        # The historical single-mapping form; a list configures several
+        # stores that are kept in step with each other.
+        entries = [dict(raw)]
+
+    parsed: List[MetadataConfig] = []
+    seen: set[tuple[str, Optional[str]]] = set()
+    for i, entry in enumerate(entries):
+        entry.setdefault("name", fs_name)
+        config = MetadataConfig.from_dict(entry)  # type: ignore[arg-type]
+        key = (config.type.value, config.store)
+        if key in seen:
+            raise ValueError(
+                f"filesystems.{fs_name}: metadata entry {i + 1} duplicates the "
+                f"{config.type.value} store "
+                f"{config.store or 'of the primary'}"
+            )
+        seen.add(key)
+        parsed.append(config)
+    if not parsed:
+        parsed = [MetadataConfig(name=fs_name, type=MetadataType.PINNED_MESSAGE)]
+    return parsed
+
+
 def _legacy_stores_and_filesystems(
     telegram: TelegramConfig, app: TGFSConfig
 ) -> tuple[Dict[str, StoreConfig], Dict[str, FilesystemConfig]]:
@@ -1161,7 +1290,7 @@ def _legacy_stores_and_filesystems(
             sync="inline",
             strict=redundancy.strict if redundancy else False,
             read_preference=[],
-            metadata=metadata,
+            metadata=[metadata],
             # tgfs allowed any channel arrangement; keep that.
             allow_shared_store=True,
         )
@@ -1173,6 +1302,7 @@ def _validate_filesystems(
 ) -> None:
     primaries: Dict[str, str] = {}
     for fs in filesystems.values():
+        _validate_metadata_entries(fs, stores)
         for store_name in fs.store_names:
             if store_name not in stores:
                 raise ValueError(f"filesystems.{fs.name}: unknown store '{store_name}'")

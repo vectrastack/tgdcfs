@@ -90,11 +90,37 @@ class GithubConfig:
         compare=False,
         repr=False,
     )
+    # Whether a failed repo write may be absorbed. Off for a repo that
+    # is the only metadata store: there the repo *is* the metadata and a
+    # write that did not land must fail loudly. On when the metadata is
+    # redundant: the in-memory tree is kept, the repo is marked stale
+    # and the redundant wrapper rebuilds it once GitHub answers again.
+    tolerate_write_failures: bool = False
+    # Set when a write was absorbed; the redundant wrapper clears it
+    # after a successful rebuild of the repo from the in-memory tree.
+    stale: bool = False
 
     async def write(self, fn: Callable[..., T], *args) -> T:
         """Run the blocking GitHub write ``fn`` off the event loop, after
         the writes queued before it."""
         return await asyncio.get_running_loop().run_in_executor(self.writer, fn, *args)
+
+    def tolerate(self, what: str, ex: Exception) -> bool:
+        """Whether a failed write is absorbed instead of raised.
+
+        Marks the repo stale either way it answers: ``True`` means the
+        caller keeps its in-memory change and the redundant metadata
+        wrapper rebuilds the repo later; ``False`` means the caller
+        undoes the change and re-raises.
+        """
+        if not self.tolerate_write_failures:
+            return False
+        self.stale = True
+        logger.warning(
+            f"{what} in {self.repo_name} failed ({ex}); the metadata "
+            f"redundancy will rebuild the repository when it answers again"
+        )
+        return True
 
 
 class GithubDirectory(TGFSDirectory):
@@ -272,9 +298,10 @@ class GithubDirectory(TGFSDirectory):
             )
             logger.info(f"Created directory {name} in GitHub repository at {dir_path}")
         except Exception as ex:
-            logger.error(f"Failed to create directory {name} in GitHub: {ex}")
-            self.children.remove(child)
-            raise
+            if not self._ghc.tolerate(f"Creating directory {child_segment}", ex):
+                logger.error(f"Failed to create directory {name} in GitHub: {ex}")
+                self.children.remove(child)
+                raise
 
         # Convert the child to GithubDirectory
         github_child = GithubDirectory(
@@ -308,7 +335,9 @@ class GithubDirectory(TGFSDirectory):
             return
         try:
             self._move_github_directory(old_prefix, new_prefix)
-        except Exception:
+        except Exception as ex:
+            if self._ghc.tolerate("Moving the directory", ex):
+                return
             # The repo *is* the metadata here, so an in-memory tree that the
             # repo does not back would only survive until the next reload.
             # Put the directory back where it was instead.
@@ -374,12 +403,13 @@ class GithubDirectory(TGFSDirectory):
         try:
             self._put_file_ref(name, file_message_id)
         except Exception as ex:
-            logger.error(
-                f"Failed to create file reference {name} in "
-                f"{self._ghc.repo_name}: {ex}"
-            )
-            self.files.remove(file_ref)
-            raise
+            if not self._ghc.tolerate(f"Creating file reference {name}", ex):
+                logger.error(
+                    f"Failed to create file reference {name} in "
+                    f"{self._ghc.repo_name}: {ex}"
+                )
+                self.files.remove(file_ref)
+                raise
         return file_ref
 
     async def create_file_ref_async(
@@ -392,12 +422,13 @@ class GithubDirectory(TGFSDirectory):
             async with self._ghc.lock:
                 await self._ghc.write(self._put_file_ref, name, file_message_id)
         except Exception as ex:
-            logger.error(
-                f"Failed to create file reference {name} in "
-                f"{self._ghc.repo_name}: {ex}"
-            )
-            self.files.remove(file_ref)
-            raise
+            if not self._ghc.tolerate(f"Creating file reference {name}", ex):
+                logger.error(
+                    f"Failed to create file reference {name} in "
+                    f"{self._ghc.repo_name}: {ex}"
+                )
+                self.files.remove(file_ref)
+                raise
         return file_ref
 
     async def create_file_ref_deferred(
@@ -436,6 +467,10 @@ class GithubDirectory(TGFSDirectory):
                 return
             except Exception as ex:
                 if attempt == DEFERRED_PUT_ATTEMPTS - 1 or not _is_transient(ex):
+                    if self._ghc.tolerate(f"Creating file reference {name}", ex):
+                        # Redundant metadata: the reference stays in the
+                        # tree, the repo is rebuilt when GitHub answers.
+                        return
                     logger.error(
                         f"Failed to create file reference {name} in "
                         f"{self._ghc.repo_name}: {ex}"
@@ -532,6 +567,9 @@ class GithubDirectory(TGFSDirectory):
                 )
                 break
             except Exception as ex:
+                # A lookup that failed for another reason than the file
+                # being gone leaves the repo out of step with the tree.
+                self._ghc.stale = True
                 logger.debug(
                     f"Could not delete {file_path} from {self._ghc.repo_name}: {ex}"
                 )
@@ -589,6 +627,9 @@ class GithubDirectory(TGFSDirectory):
                 f"from {self._ghc.repo_name}"
             )
         except Exception as ex:
+            # The in-memory tree has already lost the directory; a repo
+            # that still holds it is out of step and has to be rebuilt.
+            self._ghc.stale = True
             logger.error(
                 f"Failed to delete directory {prefix} "
                 f"from {self._ghc.repo_name}: {ex}"

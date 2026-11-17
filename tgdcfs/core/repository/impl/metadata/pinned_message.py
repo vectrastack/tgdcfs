@@ -1,10 +1,11 @@
 import json
-from typing import AsyncIterator, Dict, Optional
+from typing import Dict, FrozenSet, Optional
 
 from tgdcfs.backends.base import IStore
 from tgdcfs.core.mirror import MirrorGroup
-from tgdcfs.core.model import TGFSDirectory, TGFSFileVersion, TGFSMetadata
-from tgdcfs.core.repository.interface import IFileContentRepository, IMetaDataRepository
+from tgdcfs.core.model import TGFSMetadata
+from tgdcfs.core.repository.interface import IMetaDataRepository
+from tgdcfs.crypto.buffer import MetadataCrypto
 from tgdcfs.errors import (
     MetadataNotInitialized,
     NoPinnedMessage,
@@ -13,15 +14,21 @@ from tgdcfs.errors import (
 from tgdcfs.reqres import (
     FileMessageFromBuffer,
     MessageRespWithDocument,
-    SentFileMessage,
 )
 
 
 class PinnedMessageMetadataRepository(IMetaDataRepository):
-    """The directory tree as a pinned document in the primary store.
+    """The directory tree as a pinned document in one store.
 
-    Backend-agnostic; the mirror group keeps a pinned copy in every
-    mirror store so any of them can be promoted to primary.
+    The store is whichever channel the metadata entry names -- the file
+    system's primary by default, any of its mirrors otherwise. That is
+    what tells a Telegram pinned message and a Discord pinned message
+    apart: two entries, one per store, are two redundant copies of the
+    same tree.
+
+    Reads and writes go to that store directly, so the repository works
+    the same whether its store is the primary or a mirror, and the blob
+    is at-rest encrypted when encryption is configured (``crypto``).
     """
 
     METADATA_FILE_NAME = "metadata.json"
@@ -29,104 +36,106 @@ class PinnedMessageMetadataRepository(IMetaDataRepository):
     def __init__(
         self,
         store: IStore,
-        fc_repo: IFileContentRepository,
         mirror_group: Optional[MirrorGroup] = None,
+        skip_mirror_keys: FrozenSet[str] = frozenset(),
+        crypto: Optional[MetadataCrypto] = None,
     ):
         super().__init__()
 
-        self._message_api = store
-        self._fc_repo = fc_repo
+        self._store = store
         self._mirror_group = mirror_group
+        # Store keys whose pinned copy is maintained by their own
+        # metadata entry; the automatic promotion copy skips them.
+        self._skip_mirror_keys = skip_mirror_keys
+        self._crypto = crypto
 
         self._message_id: Optional[int] = None
         # Mirror store key -> message id of the pinned metadata copy there.
         self._mirror_message_ids: Dict[str, int] = {}
 
-    async def push(self) -> None:
+    def _serialize(self) -> bytes:
         if not self.metadata:
             raise MetadataNotInitialized()
-
         buffer = json.dumps(self.metadata.to_dict()).encode()
+        if self._crypto is not None:
+            buffer = self._crypto.encrypt(buffer)
+        return buffer
+
+    async def push(self) -> None:
+        buffer = self._serialize()
         # The reader below treats the pinned document as a single part, so
         # the blob has to fit one message of the store. That is 2 GiB on
         # Telegram and a few tens of megabytes on Discord.
-        if len(buffer) > self._message_api.caps.max_part_bytes:
+        if len(buffer) > self._store.caps.max_part_bytes:
             raise TechnicalError(
                 f"The metadata blob ({len(buffer)} bytes) does not fit one message "
-                f"of store {self._message_api.key} "
-                f"({self._message_api.caps.max_part_bytes} bytes); use the "
-                f"github_repo metadata type for this file system"
+                f"of store {self._store.key} "
+                f"({self._store.caps.max_part_bytes} bytes); use the "
+                f"github_repo or gitlab_repo metadata type for this file system"
             )
         if self._message_id is not None:
-            await self._fc_repo.update(
-                self._message_id,
-                buffer,
-                self.METADATA_FILE_NAME,
+            await self._store.replace_document(
+                self._message_id, buffer, self.METADATA_FILE_NAME
             )
             # The primary blob was edited in place, so the mirror copies
             # are stale now: forward the fresh blob, pin it, drop the old
             # copy. Keeps every mirror store self-sufficient for a
             # config-level promotion after the primary is lost.
-            if self._mirror_group:
-                await self._mirror_group.mirror_pinned(
-                    self._message_id, self._mirror_message_ids
-                )
+            await self._mirror_pinned()
         else:
-            resp = await self._fc_repo.save(
+            resp = await self._store.upload(
                 FileMessageFromBuffer.new(
                     name=self.METADATA_FILE_NAME,
                     buffer=buffer,
                 )
             )
             message_id = resp[0].message_id
-            await self._message_api.pin_message(message_id=message_id)
+            await self._store.pin_message(message_id=message_id)
             self._message_id = message_id
-            # fc_repo.save already mirrored the blob into each mirror
-            # channel; adopt those copies (pin them) instead of
-            # forwarding a second time.
-            if self._mirror_group:
-                await self._mirror_group.adopt_pinned(
-                    resp[0].mirrors, self._mirror_message_ids
-                )
+            await self._mirror_pinned()
 
-    @staticmethod
-    async def _read_all(async_iter: AsyncIterator[bytes]) -> bytes:
-        result = bytearray()
-        async for chunk in async_iter:
-            result.extend(chunk)
-        return bytes(result)
+    async def _mirror_pinned(self) -> None:
+        """Keep a pinned copy of the blob in every mirror store.
+
+        Only the entry whose store is the file system's primary does
+        this; an entry pinned to a mirror store is itself the explicit
+        redundant copy. Stores with their own metadata entry are skipped
+        -- a second pinned metadata document in one channel would be
+        ambiguous to read back.
+        """
+        if not self._mirror_group or self._message_id is None:
+            return
+        if self._store.key != self._mirror_group.primary.key:
+            return
+        await self._mirror_group.mirror_pinned(
+            self._message_id, self._mirror_message_ids, skip=set(self._skip_mirror_keys)
+        )
 
     async def new_metadata(self) -> MessageRespWithDocument:
-        root = TGFSDirectory.root_dir()
-        self.metadata = TGFSMetadata(root)
+        from tgdcfs.core.model import TGFSDirectory
+
+        self.metadata = TGFSMetadata(TGFSDirectory.root_dir())
         self._message_id = None
         await self.push()
-        return await self._message_api.get_pinned_message()
+        return await self._store.get_pinned_message()
 
     async def get(self) -> TGFSMetadata:
         try:
-            pinned_message = await self._message_api.get_pinned_message()
+            pinned_message = await self._store.get_pinned_message()
         except NoPinnedMessage:
             pinned_message = await self.new_metadata()
 
-        temp_fv = TGFSFileVersion.from_sent_file_message(
-            SentFileMessage(pinned_message.message_id, pinned_message.document.size)
+        resp = await self._store.download_file(
+            pinned_message.message_id, 0, pinned_message.document.size - 1
         )
-        # A throwaway version around the metadata blob: never cache it.
-        temp_fv.cacheable = False
+        buffer = bytearray()
+        async for chunk in resp.chunks:
+            buffer.extend(chunk)
+        data = bytes(buffer)
+        if self._crypto is not None:
+            data = self._crypto.decrypt(data)
 
-        metadata = TGFSMetadata.from_dict(
-            json.loads(
-                await self._read_all(
-                    await self._fc_repo.get(
-                        temp_fv,
-                        begin=0,
-                        end=-1,
-                        name=self.METADATA_FILE_NAME,
-                    )
-                )
-            )
-        )
+        metadata = TGFSMetadata.from_dict(json.loads(data))
 
         self._message_id = pinned_message.message_id
         return metadata

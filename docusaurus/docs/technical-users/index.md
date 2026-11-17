@@ -60,12 +60,15 @@ A **File System** represents a top-level directory exposed to WebDAV and SFTP us
 
 ## Metadata Strategies
 
-TGDCFS maintains directory trees, file attributes, modification times, and chunk mapping in a **Metadata Repository**. You can choose between two metadata backends:
+TGDCFS maintains directory trees, file attributes, modification times, and chunk mapping in a **Metadata Repository**. You can choose between three metadata backends:
 
 | Metadata Type | Description | Best Used For |
 |---|---|---|
 | `github_repo` | Stores encrypted directory metadata as JSON files in a private GitHub repository. | **Recommended for all production setups**, especially multi-backend setups (Discord + Telegram) or large trees. |
-| `pinned_message` *(default)* | Stores the metadata as a single pinned message attachment inside the store channel itself. | Small trees or setups where external GitHub tokens are not desired. A mirror whose messages are too small to hold the metadata blob (e.g. a Discord mirror of a Telegram primary) gets no pinned copy, so promoting such a mirror needs `github_repo`. |
+| `gitlab_repo` | Stores the metadata as one JSON file on a branch of a GitLab project (gitlab.com or a private installation). | Same strengths as `github_repo`, for setups that run GitLab instead of GitHub. |
+| `pinned_message` *(default)* | Stores the metadata as a single pinned message attachment inside the store channel itself. | Small trees or setups where external git hosting tokens are not desired. A mirror whose messages are too small to hold the metadata blob (e.g. a Discord mirror of a Telegram primary) gets no pinned copy, so promoting such a mirror needs `gitlab_repo`/`github_repo` -- or its own `pinned_message` metadata entry (see below). |
+
+Any number of these can be **combined into a metadata redundancy set** (a list under `filesystems.<fs>.metadata`), just like files are mirrored across stores: the first entry that can be read at boot is the tree of record, every change is written to all of them, and an entry that is temporarily unreachable is caught up automatically when it answers again. Pinned messages are configured per store, so a Telegram pinned message and a Discord pinned message are two independent copies; see [Redundancy, Mirroring & Disaster Recovery](/docs/technical-users/redundancy-and-mirroring) for the details.
 
 ---
 

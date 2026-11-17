@@ -45,6 +45,46 @@ class MetaDataApi:
     def get_root_directory(self) -> TGFSDirectory:
         return self.__metadata_repo.root()
 
+    # -- redundancy ----------------------------------------------------------
+
+    async def resync(self) -> None:
+        """Catch up the metadata stores that fell behind.
+
+        A no-op for a single metadata store; a redundant set retries its
+        stale entries so a store that was down comes back in step on
+        its own, without waiting for the next write.
+        """
+        resync = getattr(self.__metadata_repo, "resync", None)
+        if resync is not None:
+            await resync()
+
+    def health(self) -> list[dict]:
+        """The state of every metadata entry of the redundancy set."""
+        entries = getattr(self.__metadata_repo, "entries", None)
+        if entries is not None:
+            return entries
+        return [
+            {
+                "label": type(self.__metadata_repo).__name__,
+                "active": True,
+                "stale": False,
+            }
+        ]
+
+    @property
+    def metadata_repo(self) -> IMetaDataRepository:
+        """The backing repository; for introspection and tests."""
+        return self.__metadata_repo
+
+    @property
+    def has_redundant_metadata(self) -> bool:
+        """Whether the metadata is kept in several stores at once."""
+        from tgdcfs.core.repository.impl.metadata.redundant import (
+            RedundantMetadataRepository,
+        )
+
+        return isinstance(self.__metadata_repo, RedundantMetadataRepository)
+
     # -- file stats (``listing.stat_in_metadata``) -------------------------
 
     @property

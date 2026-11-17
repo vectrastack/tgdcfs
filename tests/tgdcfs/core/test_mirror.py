@@ -1,5 +1,4 @@
 import datetime
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -7,8 +6,8 @@ import pytest
 from tgdcfs.backends.base import StoreCapabilities
 from tgdcfs.config import RedundancyConfig
 from tgdcfs.core.backfill import backfill_mirrors
-from tgdcfs.core.mirror import MirrorStore, MirrorGroup
-from tgdcfs.core.model import TGFSDirectory, TGFSFileDesc, TGFSFileRef, TGFSFileVersion
+from tgdcfs.core.mirror import MirrorGroup, MirrorStore
+from tgdcfs.core.model import TGFSDirectory, TGFSFileDesc, TGFSFileVersion
 from tgdcfs.core.repository.impl.fd.store_msg import StoreFDRepository
 from tgdcfs.core.repository.impl.file_content import StoreFileContentRepository
 from tgdcfs.core.repository.interface import FDRepositoryResp

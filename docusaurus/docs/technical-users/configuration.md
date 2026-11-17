@@ -52,12 +52,22 @@ filesystems:
     read_sources:
       - tg-primary
     metadata:
-      type: github_repo
-      github_repo:
-        repo: "your-username/tgdcfs-metadata"
-        commit: "master"
-        access_token: "ghp_yourPersonalAccessToken"
-        tree_fetch_concurrency: 8  # parallel directory reads when rebuilding a big tree
+      - type: pinned_message
+        store: tg-primary     # the primary by default; any mirror works
+      - type: pinned_message
+        store: dc-mirror      # a Telegram pin and a Discord pin
+      - type: github_repo
+        github_repo:
+          repo: "your-username/tgdcfs-metadata"
+          commit: "master"
+          access_token: "ghp_yourPersonalAccessToken"
+          tree_fetch_concurrency: 8  # parallel directory reads when rebuilding a big tree
+      - type: gitlab_repo
+        gitlab_repo:
+          repo: "group/tgdcfs-metadata"
+          branch: "main"
+          access_token: "glpat-yourToken"
+          url: "https://gitlab.com"   # a private installation works too
 
 tgdcfs:
   users:
@@ -163,7 +173,10 @@ Defines top-level virtual directories exposed via WebDAV/SFTP:
   - `cache`: Client receives 201 Created as soon as upload lands in local cache disk directory. Requires `tgdcfs.cache.enabled: true` and cannot be combined with `sync: tee` or `strict: true`.
 - `read_preference` *(list of strings)*: Order in which stores are tried for reads when `read_parallel` is off. Every name must be the file system's primary or one of its mirrors.
 - `allow_shared_store` *(bool, default `false`)*: Allow a store that is the primary of one file system to also be a mirror of another. A store can never be the primary of two file systems, with or without this flag.
-- `metadata` *(object)*: `type` is `pinned_message` (default) or `github_repo` (which then requires a `github_repo` block).
+- `metadata` *(list of objects)*: The metadata redundancy set. Each entry is a full copy of the directory tree, and the file system keeps them all in step: the first entry that can be read at boot is the tree of record, every change is written to all of them, and an entry that is temporarily unreachable is marked stale and caught up as soon as it answers again. A single mapping (the historical form) still works and becomes a one-entry list.
+  - `type` is `pinned_message` (default), `github_repo` (requires a `github_repo` block) or `gitlab_repo` (requires a `gitlab_repo` block).
+  - `pinned_message` entries take an optional `store`: the store (as named in `stores`) whose channel holds the pinned metadata document. It defaults to the file system's primary, and may name any of its mirrors -- which is how a Telegram pinned message and a Discord pinned message are told apart and configured separately. A store with its own pinned entry is skipped by the automatic promotion copy of the pinned message, so one channel never holds two pinned metadata documents.
+  - The same `(type, store)` pair may not be listed twice; `github_repo` and `gitlab_repo` may appear at most once each.
 
 ---
 
