@@ -245,7 +245,7 @@ function MetadataStoreEditor({
               variant="outlined"
               component="a"
               size="large"
-              href="https://docs.gitlab.com/user/profile/personal_access_tokens/"
+              href="https://gitlab.com/-/user_settings/personal_access_tokens"
               target="_blank"
               rel="noopener noreferrer"
               sx={{ textTransform: "none" }}
