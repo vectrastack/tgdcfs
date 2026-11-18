@@ -1511,6 +1511,11 @@ class TestPushFullSync:
             if e._InputGitTreeElement__content == ""
         }
         assert created == {"docs/readme.42"}
+        # A create must carry content only: an element with a sha (even a
+        # null one) alongside content is rejected by GitHub with a 422.
+        assert all(
+            "sha" not in e._identity for e in elements if "content" in e._identity
+        )
         # The kept blobs are re-listed with their original sha and mode.
         kept = {
             e._InputGitTreeElement__path: e._InputGitTreeElement__sha
@@ -1642,6 +1647,9 @@ class TestPushFullSync:
 
         elements = mock_ghc.repo.create_git_tree.call_args[0][0]
         assert {e._InputGitTreeElement__path for e in elements} == {"docs/readme.42"}
+        assert all(
+            "sha" not in e._identity for e in elements if "content" in e._identity
+        )
         # An initial commit has no parent.
         assert mock_ghc.repo.create_git_commit.call_args[0][2] == []
         mock_ghc.repo.create_git_ref.assert_called_once_with(

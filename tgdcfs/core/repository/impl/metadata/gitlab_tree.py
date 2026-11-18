@@ -527,7 +527,11 @@ class GitlabRepository:
 
         actions: List[dict] = []
         for path, (sha, content) in sorted(desired.items()):
-            if content is not None:
+            if content is None and sha is None:
+                # "sha": null removes the entry, like GitHub's tree API.
+                if path in current:
+                    actions.append({"action": "delete", "file_path": path})
+            elif content is not None:
                 actions.append(
                     {
                         "action": "update" if path in current else "create",

@@ -36,6 +36,11 @@ the fact on the commits that shipped them.
   queues behind it again. When the probe finds the service answering
   again, the breaker closes and the heal worker brings the store back in
   line within a probe interval.
+- The full metadata tree sync and the GitLab tree mirror no longer send
+  a create element that carries both a sha and a content: the GitHub
+  Git tree API rejects that combination with a 422, which left every
+  sync with new blobs failing forever, and the GitLab mirror dropped
+  the deletion of a stats file through a blob fetch of a null sha.
 - The Docker image names in the config generator's command panel and in
   the getting-started guide follow the repository the site is built from.
   They were hard-coded (and kept pointing at a foreign namespace, because

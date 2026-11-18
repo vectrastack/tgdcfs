@@ -298,9 +298,9 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             if not creates and not deletes:
                 return
             elements = [
-                InputGitTreeElement(
-                    path=path, mode="100644", type="blob", sha=None, content=""
-                )
+                # The content creates the blob server side; an element that
+                # also carries a sha (even null) is rejected with a 422.
+                InputGitTreeElement(path=path, mode="100644", type="blob", content="")
                 for path in creates
             ]
             elements += [
@@ -335,9 +335,8 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
         """First commit on a branch that does not exist yet."""
         repo = self._ghc.repo
         elements = [
-            InputGitTreeElement(
-                path=path, mode="100644", type="blob", sha=None, content=""
-            )
+            # See _sync_tree_commit: content must go alone.
+            InputGitTreeElement(path=path, mode="100644", type="blob", content="")
             for path in sorted(desired_blobs)
         ]
         new_tree = repo.create_git_tree(elements)

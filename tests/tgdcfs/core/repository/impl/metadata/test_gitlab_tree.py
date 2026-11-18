@@ -527,6 +527,53 @@ class TestFacade:
 
         assert gitlab.file_content("main", "readme.md") == "hi"
 
+    async def test_a_delete_element_removes_the_file(self, gitlab):
+        """A "sha": null element deletes the entry, like GitHub's tree
+        API answers; before, the facade fetched a blob named None."""
+        gitlab.commit(
+            "main",
+            "first",
+            [
+                {
+                    "action": "create",
+                    "file_path": "sub/.tgdcfsstats.json",
+                    "content": "{}",
+                    "encoding": "text",
+                },
+            ],
+        )
+        facade = GitlabRepository(gitlab_config())
+        ref = facade.get_git_ref("heads/main")
+        base_commit = facade.get_git_commit(ref.object.sha)
+        pending = facade.create_git_tree(
+            [
+                InputGitTreeElement(
+                    path="sub/.tgdcfsstats.json", mode="100644", type="blob", sha=None
+                )
+            ],
+            base_tree=base_commit.tree,
+        )
+        facade.create_git_commit("drop the stats", pending, [base_commit])
+
+        assert gitlab.file_content("main", "sub/.tgdcfsstats.json") is None
+
+    async def test_a_delete_element_of_a_missing_file_is_a_noop(self, gitlab):
+        gitlab.commit("main", "first", [])
+        facade = GitlabRepository(gitlab_config())
+        ref = facade.get_git_ref("heads/main")
+        base_commit = facade.get_git_commit(ref.object.sha)
+        pending = facade.create_git_tree(
+            [
+                InputGitTreeElement(
+                    path="gone/.tgdcfsstats.json", mode="100644", type="blob", sha=None
+                )
+            ],
+            base_tree=base_commit.tree,
+        )
+        facade.create_git_commit("drop the stats", pending, [base_commit])
+
+        assert gitlab.file_content("main", "gone/.tgdcfsstats.json") is None
+
     async def test_a_commit_bootstraps_an_empty_project(self, monkeypatch):
         fake = FakeGitlab(empty_project=True)
 
